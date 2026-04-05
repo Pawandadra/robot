@@ -28,6 +28,10 @@ class GigaSerialNode(Node):
         self.declare_parameter("port", "auto")
         self.declare_parameter("baud_rate", 115200)
         self.declare_parameter("read_timeout_sec", 0.4)
+        # After open, many boards reset; sketch + Serial.begin need time before STATUS works.
+        self.declare_parameter("serial_boot_delay_sec", 2.0)
+        self.declare_parameter("sync_attempts", 6)
+        self.declare_parameter("sync_response_timeout_sec", 3.0)
 
         port_raw = self.get_parameter("port").get_parameter_value().string_value
         port = resolve_port(port_raw)
@@ -49,6 +53,22 @@ class GigaSerialNode(Node):
         if self._read_timeout <= 0.0:
             self._read_timeout = 0.4
 
+        self._boot_delay = max(
+            0.0,
+            float(
+                self.get_parameter("serial_boot_delay_sec").get_parameter_value().double_value
+            ),
+        )
+        self._sync_attempts = max(
+            1, int(self.get_parameter("sync_attempts").get_parameter_value().integer_value)
+        )
+        self._sync_response_timeout = max(
+            0.5,
+            float(
+                self.get_parameter("sync_response_timeout_sec").get_parameter_value().double_value
+            ),
+        )
+
         try:
             self._ser = serial.Serial(port, baud, timeout=self._read_timeout)
         except serial.SerialException as e:
@@ -59,6 +79,18 @@ class GigaSerialNode(Node):
             raise
         self._lock = threading.Lock()
         self._hold_active = False
+
+        # Reduce chance of USB-serial auto-reset glitches; then wait for sketch boot.
+        try:
+            self._ser.setDTR(False)
+        except (AttributeError, OSError, serial.SerialException):
+            pass
+        if self._boot_delay > 0.0:
+            self.get_logger().info(
+                f"Waiting {self._boot_delay:.1f}s for Giga sketch after USB open (serial_boot_delay_sec)"
+            )
+            time.sleep(self._boot_delay)
+        self._drain_input()
 
         qos_latched = QoSProfile(
             depth=1,
@@ -101,6 +133,19 @@ class GigaSerialNode(Node):
             raw = self._ser.readline()
         return raw.decode("utf-8", errors="replace").strip()
 
+    def _drain_input(self) -> None:
+        """Drop buffered RX (boot banner, TICK lines) so STATUS ack is readable."""
+        with self._lock:
+            old_timeout = self._ser.timeout
+            self._ser.timeout = 0.05
+            try:
+                for _ in range(200):
+                    chunk = self._ser.read(512)
+                    if not chunk:
+                        break
+            finally:
+                self._ser.timeout = old_timeout
+
     def _read_lines_until(
         self,
         predicate,
@@ -122,20 +167,43 @@ class GigaSerialNode(Node):
         return last_match
 
     def _sync_from_device(self) -> None:
-        """Send STATUS and parse EXT_HOLD 0|1 (skips verbose TICK noise)."""
+        """Send STATUS and parse EXT_HOLD 0|1; retry (USB CDC / boot banner)."""
+
+        def is_status(line: str) -> bool:
+            return bool(re.match(r"EXT_HOLD\s+([01])", line))
+
+        last_reply = ""
         try:
-            self._write_line("STATUS")
+            for attempt in range(self._sync_attempts):
+                self._drain_input()
+                self._write_line("STATUS")
+                reply = self._read_lines_until(
+                    is_status,
+                    overall_timeout_sec=self._sync_response_timeout,
+                    max_lines=96,
+                )
+                last_reply = reply
+                m = re.match(r"EXT_HOLD\s+([01])", reply)
+                if m:
+                    self._hold_active = m.group(1) == "1"
+                    if attempt == 0:
+                        self.get_logger().info(
+                            f"sync STATUS -> hold_active={self._hold_active}"
+                        )
+                    else:
+                        self.get_logger().info(
+                            f"sync STATUS ok on attempt {attempt + 1} -> "
+                            f"hold_active={self._hold_active}"
+                        )
+                    return
+                time.sleep(0.12)
 
-            def is_status(line: str) -> bool:
-                return bool(re.match(r"EXT_HOLD\s+([01])", line))
-
-            reply = self._read_lines_until(is_status)
-            m = re.match(r"EXT_HOLD\s+([01])", reply)
-            if m:
-                self._hold_active = m.group(1) == "1"
-                self.get_logger().info(f"sync STATUS -> hold_active={self._hold_active}")
-            else:
-                self.get_logger().warn(f"sync: no EXT_HOLD line (last={reply!r})")
+            self.get_logger().warn(
+                f"sync: no EXT_HOLD after {self._sync_attempts} attempts "
+                f"(last={last_reply!r}). Robot may still run; use "
+                "`ros2 service call /giga/sync_status std_srvs/srv/Trigger` "
+                "or raise serial_boot_delay_sec / sync_response_timeout_sec."
+            )
         except Exception as e:
             self.get_logger().error(f"sync failed: {e}")
 

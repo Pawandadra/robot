@@ -50,6 +50,12 @@ ros2 run giga_serial_bridge giga_serial_node
 # or stable:  --ros-args -p port:=/dev/serial/by-id/usb-Arduino_GIGA_...
 ```
 
+USB CDC often **resets the Giga** when the port opens; the bridge waits **`serial_boot_delay_sec`** (default **2 s**), **drains** the boot banner, then **retries `STATUS`** a few times. Tune if sync still warns:
+
+`--ros-args -p serial_boot_delay_sec:=2.5 -p sync_attempts:=8 -p sync_response_timeout_sec:=4.0`
+
+Keep **`SERIAL_LOG_VERBOSE 0`** on the Giga so `EXT_HOLD` is not buried in `TICK` spam.
+
 **2 — Supervisor** (debounces faces + interaction → `/giga/set_hold`):
 
 ```bash
