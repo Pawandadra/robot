@@ -35,7 +35,15 @@
  * Loop / CPU: HC-SR04 uses blocking pulseIn + delay. Heavy paths are readAllFrontsAndSidesFiltered
  * (15 pings) and readFrontsTripleFiltered (9). Cruise throttles fronts; REV_CLR uses front-only
  * scans on REV_CLR_SCAN_INTERVAL_MS. Verbose Serial adds latency — use SERIAL_LOG_VERBOSE 0 for demos.
+ *
+ * Host / ROS (USB Serial, SERIAL_BAUD): line-based commands from the laptop (newline-terminated):
+ *   HOLD   — stop motors; freeze navigation (no phase advance / sonar / stuck logic this loop).
+ *   RUN    — resume autonomous navigation from current phase.
+ *   STATUS or ? — reply with one line: EXT_HOLD 0|1
+ * Replies: OK HOLD, OK RUN, or ERR <line>. For stable control + logging, set SERIAL_LOG_VERBOSE 0.
  */
+
+#include <string.h>
 
 #define L_RPWM 2
 #define L_LPWM 3
@@ -202,6 +210,69 @@ static uint8_t globalStuckCounter = 0;
 /** 0 = long reverse; 1 = first 90°; 2 = second 90° (U-turn). */
 static uint8_t stuckRecoveryStep = 0;
 static bool stuckRecoveryTurnLeft = true;
+
+/** USB host (laptop): when true, motors stopped and main navigation switch skipped. */
+static bool externalHoldActive = false;
+
+static char rosCmdLineBuf[40];
+static uint8_t rosCmdLineLen = 0;
+
+static void rosToLowerAscii(char *s) {
+  for (; *s; ++s) {
+    if (*s >= 'A' && *s <= 'Z')
+      *s = (char)(*s - ('A' - 'a'));
+  }
+}
+
+static void rosApplyLine(char *line) {
+  while (*line == ' ' || *line == '\t')
+    ++line;
+  size_t n = strlen(line);
+  while (n > 0 && (line[n - 1] == ' ' || line[n - 1] == '\t')) {
+    line[--n] = '\0';
+  }
+  if (n == 0)
+    return;
+  rosToLowerAscii(line);
+  if (strcmp(line, "hold") == 0) {
+    externalHoldActive = true;
+    Serial.println(F("OK HOLD"));
+    return;
+  }
+  if (strcmp(line, "run") == 0) {
+    externalHoldActive = false;
+    Serial.println(F("OK RUN"));
+    return;
+  }
+  if (strcmp(line, "status") == 0 || strcmp(line, "?") == 0) {
+    Serial.print(F("EXT_HOLD "));
+    Serial.println(externalHoldActive ? '1' : '0');
+    return;
+  }
+  Serial.print(F("ERR "));
+  Serial.println(line);
+}
+
+/** Non-blocking: accumulate bytes until \\n or \\r, then handle one command line. */
+static void pollHostUsbCommands() {
+  while (Serial.available() > 0) {
+    int ri = Serial.read();
+    if (ri < 0)
+      break;
+    char c = (char)ri;
+    if (c == '\n' || c == '\r') {
+      if (rosCmdLineLen > 0) {
+        rosCmdLineBuf[rosCmdLineLen] = '\0';
+        rosApplyLine((char *)rosCmdLineBuf);
+        rosCmdLineLen = 0;
+      }
+    } else if (rosCmdLineLen < sizeof(rosCmdLineBuf) - 1U) {
+      rosCmdLineBuf[rosCmdLineLen++] = (uint8_t)c;
+    } else {
+      rosCmdLineLen = 0;
+    }
+  }
+}
 
 static bool layerBActive() {
   return layerBUntil != 0 && millis() < layerBUntil;
@@ -935,7 +1006,8 @@ void setup() {
   }
   delay(50);
   computeManeuverTimings();
-  Serial.println(F("=== robot test.ino (3-front) Giga ==="));
+  Serial.println(F("=== robot movement.ino (3-front) Giga ==="));
+  Serial.println(F("Host USB: lines HOLD | RUN | STATUS | ? (newline)"));
   Serial.print(F("TURN_90 eff "));
   Serial.print(turnMs90());
   Serial.print(F(" TURN_45 eff "));
@@ -973,6 +1045,18 @@ void setup() {
 void loop() {
   const unsigned long now = millis();
 
+  pollHostUsbCommands();
+
+  digitalWrite(L_REN, HIGH);
+  digitalWrite(L_LEN, HIGH);
+  digitalWrite(R_REN, HIGH);
+  digitalWrite(R_LEN, HIGH);
+
+  if (externalHoldActive) {
+    motorsStop();
+    return;
+  }
+
   if (globalStuckCounter >= STUCK_THRESHOLD && phase != PH_STUCK_RECOVERY) {
     if (!phaseIsAvoidTurn(phase))
       enterStuckRecovery();
@@ -1004,11 +1088,6 @@ void loop() {
     Serial.println();
   }
 #endif
-
-  digitalWrite(L_REN, HIGH);
-  digitalWrite(L_LEN, HIGH);
-  digitalWrite(R_REN, HIGH);
-  digitalWrite(R_LEN, HIGH);
 
   switch (phase) {
   case PH_CRUISE: {
