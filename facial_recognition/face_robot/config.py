@@ -13,7 +13,23 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 SUPPRESS_AUDIO_BACKEND_NOISE = os.getenv("SUPPRESS_AUDIO_BACKEND_NOISE", "1") == "1"
 ENABLE_VOICE = os.getenv("ENABLE_VOICE", "1") == "1"
-ENABLE_ROS = os.getenv("ENABLE_ROS", "0").strip().lower() in ("1", "true", "yes")
+# USB serial to Arduino Giga: send HOLD/RUN from the vision loop (same process).
+ENABLE_GIGA = os.getenv("ENABLE_GIGA", "1").strip().lower() in ("1", "true", "yes")
+GIGA_SERIAL_PORT = os.getenv("GIGA_SERIAL_PORT", "auto").strip()
+GIGA_BAUD = int(os.getenv("GIGA_BAUD", "115200"))
+GIGA_BOOT_DELAY_SEC = float(os.getenv("GIGA_BOOT_DELAY_SEC", "2.0"))
+# While a face is present, re-send HOLD every N seconds (0 = off). Helps if USB CDC drops a line.
+GIGA_HOLD_PULSE_SEC = float(os.getenv("GIGA_HOLD_PULSE_SEC", "0.25"))
+# Print [Giga] HOLD/RUN when the command changes (troubleshooting).
+GIGA_DEBUG = os.getenv("GIGA_DEBUG", "0").strip().lower() in ("1", "true", "yes")
+# Consecutive processed frames with ≥1 face before HOLD (1 = stop as soon as a face is seen).
+HOLD_PRESENT_STREAK = int(os.getenv("HOLD_PRESENT_STREAK", "1"))
+HOLD_ABSENT_STREAK = int(os.getenv("HOLD_ABSENT_STREAK", "4"))
+HOLD_POST_INTERACTION_GRACE_SEC = float(os.getenv("HOLD_POST_INTERACTION_GRACE_SEC", "4.0"))
+# Extra stillness after spoken greetings (seconds); vision loop keeps ticking hold during wait.
+GREET_PAUSE_AFTER_KNOWN_SEC = float(os.getenv("GREET_PAUSE_AFTER_KNOWN_SEC", "1.5"))
+GREET_PAUSE_AFTER_ENROLL_SEC = float(os.getenv("GREET_PAUSE_AFTER_ENROLL_SEC", "2.0"))
+GREET_PAUSE_AFTER_GROUP_SEC = float(os.getenv("GREET_PAUSE_AFTER_GROUP_SEC", "1.5"))
 
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "2"))
 ALLOW_CAMERA_FALLBACK = os.getenv("ALLOW_CAMERA_FALLBACK", "1") == "1"

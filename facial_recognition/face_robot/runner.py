@@ -7,10 +7,20 @@ import numpy as np
 from face_robot import config
 from face_robot import database
 from face_robot import face_storage
-from face_robot import ros_io
 from face_robot import speech_input
 from face_robot import vision
 from face_robot import voice
+
+
+def _pause_with_hold(hold, faces_count: int, interaction_busy: bool, seconds: float) -> None:
+    """Sleep but keep USB hold refreshed (pulse) so the robot stays still."""
+    if seconds <= 0:
+        return
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if hold:
+            hold.tick(faces_count, interaction_busy)
+        time.sleep(0.05)
 
 
 def run():
@@ -30,7 +40,30 @@ def run():
 
     print("✅ System running")
 
-    ros_io.init()
+    hold = None
+    if config.ENABLE_GIGA:
+        from face_robot.giga_link import open_giga_optional
+        from face_robot.hold_control import HoldController
+
+        g = open_giga_optional(
+            config.GIGA_SERIAL_PORT,
+            config.GIGA_BAUD,
+            config.GIGA_BOOT_DELAY_SEC,
+            debug=config.GIGA_DEBUG,
+        )
+        if g is None:
+            print(
+                "❌ ENABLE_GIGA is on but the serial port did not open — "
+                "the robot will NOT stop for faces. Fix USB, permissions (dialout), "
+                "or set GIGA_SERIAL_PORT to the Giga device."
+            )
+        hold = HoldController(
+            g,
+            config.HOLD_PRESENT_STREAK,
+            config.HOLD_ABSENT_STREAK,
+            config.HOLD_POST_INTERACTION_GRACE_SEC,
+            hold_pulse_sec=config.GIGA_HOLD_PULSE_SEC,
+        )
 
     known_profiles, known_samples = database.load_users()
 
@@ -50,9 +83,12 @@ def run():
     track_cache = []
     _TRACK_CACHE_MAX = 48
 
+    interaction_busy = False
+
     try:
         while True:
             try:
+                skip_tail_hold_tick = False
                 ret, frame = video.read()
                 if not ret:
                     # Avoid busy-spinning when the device stalls or returns no frame.
@@ -69,8 +105,8 @@ def run():
                     match_counts.clear()
                     unknown_count = 0
                     track_cache.clear()
-                    ros_io.publish_face_count(0)
-                    ros_io.spin_once()
+                    if hold:
+                        hold.tick(0, interaction_busy)
                     continue
 
                 now = time.time()
@@ -149,10 +185,16 @@ def run():
                     unknown_count = 0
                     last_group_present[group_key] = now
                     if group_key not in greeted_groups:
-                        voice.speak_async(group_greeting)
+                        voice.speak(group_greeting)
                         greeted_groups.add(group_key)
-                    ros_io.publish_face_count(len(valid_faces))
-                    ros_io.spin_once()
+                        _pause_with_hold(
+                            hold,
+                            len(valid_faces),
+                            interaction_busy,
+                            config.GREET_PAUSE_AFTER_GROUP_SEC,
+                        )
+                    if hold:
+                        hold.tick(len(valid_faces), interaction_busy)
                     continue
 
                 for name in names:
@@ -168,8 +210,14 @@ def run():
                             match_counts[name] >= config.RECOGNITION_STREAK
                             and name not in greeted_active
                         ):
-                            voice.speak_async(f"Hello {name}")
+                            voice.speak(f"Hello {name}")
                             greeted_active.add(name)
+                            _pause_with_hold(
+                                hold,
+                                len(valid_faces),
+                                interaction_busy,
+                                config.GREET_PAUSE_AFTER_KNOWN_SEC,
+                            )
 
                     else:
                         match_counts.clear()
@@ -183,10 +231,18 @@ def run():
                             )
                         ):
                             last_present["unknown"] = now
-                            voice.speak_async("Hello")
+                            interaction_busy = True
+                            if hold:
+                                hold.tick(len(valid_faces), True)
+                            voice.speak("Hello")
+                            _pause_with_hold(
+                                hold,
+                                len(valid_faces),
+                                True,
+                                config.GREET_PAUSE_AFTER_KNOWN_SEC,
+                            )
 
-                            ros_io.publish_interaction_busy(True)
-                            ros_io.spin_once()
+                            enrollment_success = False
                             try:
                                 person_name = speech_input.get_name()
 
@@ -201,11 +257,13 @@ def run():
                                     ret, frame = video.read()
                                     if not ret:
                                         time.sleep(0.05)
-                                        ros_io.spin_once()
+                                        if hold:
+                                            hold.tick(0, True)
                                         continue
                                     if not vision.is_sharp_enough(frame):
                                         time.sleep(0.05)
-                                        ros_io.spin_once()
+                                        if hold:
+                                            hold.tick(0, True)
                                         continue
 
                                     rgb_i, faces = vision.detect_faces(frame)
@@ -230,14 +288,21 @@ def run():
                                         )
 
                                     time.sleep(0.3)
-                                    ros_io.spin_once()
+                                    if hold:
+                                        hold.tick(0, True)
 
                                 if len(samples) > 0:
                                     database.save_user(
                                         person_name, samples, face_file_hash=face_file_hash
                                     )
 
-                                    voice.speak_async(f"Nice to meet you {person_name}")
+                                    voice.speak(f"Nice to meet you {person_name}")
+                                    _pause_with_hold(
+                                        hold,
+                                        len(valid_faces),
+                                        True,
+                                        config.GREET_PAUSE_AFTER_ENROLL_SEC,
+                                    )
 
                                     existing_samples = known_samples.get(person_name, [])
                                     updated_samples = existing_samples + samples
@@ -250,17 +315,25 @@ def run():
                                     last_present["unknown"] = time.time()
                                     last_enrollment_time = time.time()
                                     unknown_count = 0
+                                    enrollment_success = True
                             finally:
-                                ros_io.publish_interaction_busy(False)
-                                ros_io.spin_once()
+                                interaction_busy = False
+                                if hold:
+                                    hold.tick(
+                                        len(valid_faces),
+                                        False,
+                                        resume_with_90_turn=enrollment_success,
+                                    )
+                                    skip_tail_hold_tick = True
 
-                ros_io.publish_face_count(len(valid_faces))
-                ros_io.spin_once()
+                if hold and not skip_tail_hold_tick:
+                    hold.tick(len(valid_faces), interaction_busy)
 
             except KeyboardInterrupt:
                 return
 
     finally:
-        ros_io.shutdown()
+        if hold:
+            hold.shutdown()
         video.release()
         database.close_db()
