@@ -95,6 +95,14 @@ class GigaSerialNode(Node):
             raise
         self._lock = threading.Lock()
         self._hold_active = False
+        self._startup_thread: threading.Thread | None = None
+        # Latest command from /giga/set_hold; worker applies so the executor never blocks on serial.
+        self._want_hold_lock = threading.Lock()
+        self._want_hold: bool | None = None
+        self._hold_worker_stop = threading.Event()
+        self._hold_worker_thread = threading.Thread(
+            target=self._hold_worker_loop, daemon=True, name="giga-hold-serial"
+        )
 
         # Reduce chance of USB-serial auto-reset glitches; then wait for sketch boot.
         try:
@@ -114,7 +122,8 @@ class GigaSerialNode(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self._pub_hold = self.create_publisher(Bool, "hold_active", qos_latched)
-        self.create_subscription(Bool, "set_hold", self._on_set_hold, 10)
+        qos_cmd = QoSProfile(depth=50)
+        self.create_subscription(Bool, "set_hold", self._on_set_hold, qos_cmd)
 
         self._srv_hold = self.create_service(Trigger, "trigger_hold", self._srv_hold_cb)
         self._srv_run = self.create_service(Trigger, "trigger_run", self._srv_run_cb)
@@ -129,8 +138,12 @@ class GigaSerialNode(Node):
         self._startup_timer = self.create_timer(
             self._startup_sync_delay, self._startup_sync_callback
         )
+        self._hold_worker_thread.start()
 
     def destroy_node(self) -> bool:
+        self._hold_worker_stop.set()
+        if self._hold_worker_thread.is_alive():
+            self._hold_worker_thread.join(timeout=3.0)
         with self._lock:
             if self._ser and self._ser.is_open:
                 self._ser.close()
@@ -256,13 +269,46 @@ class GigaSerialNode(Node):
             self._startup_timer.cancel()
         except Exception:
             pass
+        self._startup_thread = threading.Thread(
+            target=self._startup_sync_thread_main,
+            daemon=True,
+            name="giga-startup-sync",
+        )
+        self._startup_thread.start()
+
+    def _startup_sync_thread_main(self) -> None:
+        """STATUS sync can take many seconds; must not block the executor."""
         self.get_logger().info("Running startup STATUS sync (serial)…")
-        self._sync_from_device()
-        self._publish_hold_state()
+        try:
+            self._sync_from_device()
+            self._publish_hold_state()
+        except Exception as e:
+            self.get_logger().error(f"startup sync thread: {e}")
         self.get_logger().info(
             "Giga bridge ready: /giga/set_hold, /giga/hold_active, "
             "trigger_hold | trigger_run | sync_status"
         )
+
+    def _hold_worker_loop(self) -> None:
+        while not self._hold_worker_stop.is_set():
+            with self._want_hold_lock:
+                want = self._want_hold
+            if want is None:
+                time.sleep(0.02)
+                continue
+            ok = False
+            try:
+                ok, detail = self._send_hold(want)
+                if not ok:
+                    self.get_logger().warn(f"set_hold({want}) incomplete: {detail}")
+            except Exception as e:
+                self.get_logger().error(f"hold worker: {e}")
+            if ok:
+                with self._want_hold_lock:
+                    if self._want_hold == want:
+                        self._want_hold = None
+            else:
+                time.sleep(0.15)
 
     def _send_hold(self, want_hold: bool) -> tuple[bool, str]:
         if want_hold == self._hold_active:
@@ -303,9 +349,8 @@ class GigaSerialNode(Node):
             return False, str(e)
 
     def _on_set_hold(self, msg: Bool) -> None:
-        ok, detail = self._send_hold(msg.data)
-        if not ok:
-            self.get_logger().warn(f"set_hold({msg.data}) incomplete: {detail}")
+        with self._want_hold_lock:
+            self._want_hold = bool(msg.data)
 
     def _srv_hold_cb(self, _req: Trigger.Request, resp: Trigger.Response) -> Trigger.Response:
         ok, detail = self._send_hold(True)
@@ -328,13 +373,18 @@ class GigaSerialNode(Node):
 
 
 def main() -> None:
+    from rclpy.executors import MultiThreadedExecutor
+
     rclpy.init()
     node = GigaSerialNode()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.remove_node(node)
         node.destroy_node()
         rclpy.shutdown()
 
