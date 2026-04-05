@@ -7,3 +7,4 @@ PyAudio
 setuptools<81
 vosk
 python-dotenv
+PyYAML>=6.0

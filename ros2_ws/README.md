@@ -71,7 +71,14 @@ export ENABLE_ROS=1
 python main.py
 ```
 
-If `import rclpy` fails, list the correct folder:
+If **`No module named 'yaml'`** (or rclpy import fails after that), install PyYAML in the same environment as `main.py`:
+
+```bash
+pip install PyYAML
+# or: pip install -r requirements.txt   # includes PyYAML for ENABLE_ROS
+```
+
+If `import rclpy` still fails, fix `PYTHONPATH` — list the correct lib folder:
 
 ```bash
 ls /opt/ros/jazzy/lib/
