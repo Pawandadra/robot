@@ -13,6 +13,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 SUPPRESS_AUDIO_BACKEND_NOISE = os.getenv("SUPPRESS_AUDIO_BACKEND_NOISE", "1") == "1"
 ENABLE_VOICE = os.getenv("ENABLE_VOICE", "1") == "1"
+ENABLE_ROS = os.getenv("ENABLE_ROS", "0").strip().lower() in ("1", "true", "yes")
 
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "2"))
 ALLOW_CAMERA_FALLBACK = os.getenv("ALLOW_CAMERA_FALLBACK", "1") == "1"

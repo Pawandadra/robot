@@ -7,6 +7,7 @@ import numpy as np
 from face_robot import config
 from face_robot import database
 from face_robot import face_storage
+from face_robot import ros_io
 from face_robot import speech_input
 from face_robot import vision
 from face_robot import voice
@@ -28,6 +29,8 @@ def run():
         sys.exit(1)
 
     print("✅ System running")
+
+    ros_io.init()
 
     known_profiles, known_samples = database.load_users()
 
@@ -66,6 +69,8 @@ def run():
                     match_counts.clear()
                     unknown_count = 0
                     track_cache.clear()
+                    ros_io.publish_face_count(0)
+                    ros_io.spin_once()
                     continue
 
                 now = time.time()
@@ -146,6 +151,8 @@ def run():
                     if group_key not in greeted_groups:
                         voice.speak_async(group_greeting)
                         greeted_groups.add(group_key)
+                    ros_io.publish_face_count(len(valid_faces))
+                    ros_io.spin_once()
                     continue
 
                 for name in names:
@@ -178,65 +185,82 @@ def run():
                             last_present["unknown"] = now
                             voice.speak_async("Hello")
 
-                            person_name = speech_input.get_name()
+                            ros_io.publish_interaction_busy(True)
+                            ros_io.spin_once()
+                            try:
+                                person_name = speech_input.get_name()
 
-                            if person_name is None:
-                                unknown_count = 0
-                                continue
-
-                            samples = []
-                            face_file_hash = None
-
-                            for _ in range(config.ENROLLMENT_SAMPLES):
-                                ret, frame = video.read()
-                                if not ret:
-                                    time.sleep(0.05)
-                                    continue
-                                if not vision.is_sharp_enough(frame):
-                                    time.sleep(0.05)
+                                if person_name is None:
+                                    unknown_count = 0
                                     continue
 
-                                rgb_i, faces = vision.detect_faces(frame)
-                                encs = face_recognition.face_encodings(
-                                    rgb_i,
-                                    faces,
-                                    num_jitters=config.FACE_ENCODING_JITTERS,
-                                )
+                                samples = []
+                                face_file_hash = None
 
-                                primary_encoding, primary_box = vision.pick_primary_face(encs, faces)
-                                if primary_encoding is not None:
-                                    samples.append(primary_encoding)
+                                for _ in range(config.ENROLLMENT_SAMPLES):
+                                    ret, frame = video.read()
+                                    if not ret:
+                                        time.sleep(0.05)
+                                        ros_io.spin_once()
+                                        continue
+                                    if not vision.is_sharp_enough(frame):
+                                        time.sleep(0.05)
+                                        ros_io.spin_once()
+                                        continue
 
-                                if face_file_hash is None and primary_box is not None:
-                                    _, face_file_hash = face_storage.save_enrollment_reference(
-                                        frame,
-                                        primary_box,
-                                        rgb_i.shape,
-                                        person_name,
+                                    rgb_i, faces = vision.detect_faces(frame)
+                                    encs = face_recognition.face_encodings(
+                                        rgb_i,
+                                        faces,
+                                        num_jitters=config.FACE_ENCODING_JITTERS,
                                     )
 
-                                time.sleep(0.3)
+                                    primary_encoding, primary_box = vision.pick_primary_face(
+                                        encs, faces
+                                    )
+                                    if primary_encoding is not None:
+                                        samples.append(primary_encoding)
 
-                            if len(samples) > 0:
-                                database.save_user(person_name, samples, face_file_hash=face_file_hash)
+                                    if face_file_hash is None and primary_box is not None:
+                                        _, face_file_hash = face_storage.save_enrollment_reference(
+                                            frame,
+                                            primary_box,
+                                            rgb_i.shape,
+                                            person_name,
+                                        )
 
-                                voice.speak_async(f"Nice to meet you {person_name}")
+                                    time.sleep(0.3)
+                                    ros_io.spin_once()
 
-                                existing_samples = known_samples.get(person_name, [])
-                                updated_samples = existing_samples + samples
-                                known_samples[person_name] = updated_samples
-                                known_profiles[person_name] = np.mean(
-                                    np.array(updated_samples), axis=0
-                                )
+                                if len(samples) > 0:
+                                    database.save_user(
+                                        person_name, samples, face_file_hash=face_file_hash
+                                    )
 
-                                last_present[person_name] = time.time()
-                                last_present["unknown"] = time.time()
-                                last_enrollment_time = time.time()
-                                unknown_count = 0
+                                    voice.speak_async(f"Nice to meet you {person_name}")
+
+                                    existing_samples = known_samples.get(person_name, [])
+                                    updated_samples = existing_samples + samples
+                                    known_samples[person_name] = updated_samples
+                                    known_profiles[person_name] = np.mean(
+                                        np.array(updated_samples), axis=0
+                                    )
+
+                                    last_present[person_name] = time.time()
+                                    last_present["unknown"] = time.time()
+                                    last_enrollment_time = time.time()
+                                    unknown_count = 0
+                            finally:
+                                ros_io.publish_interaction_busy(False)
+                                ros_io.spin_once()
+
+                ros_io.publish_face_count(len(valid_faces))
+                ros_io.spin_once()
 
             except KeyboardInterrupt:
                 return
 
     finally:
+        ros_io.shutdown()
         video.release()
         database.close_db()
