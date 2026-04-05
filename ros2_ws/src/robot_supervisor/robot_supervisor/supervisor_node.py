@@ -93,10 +93,14 @@ class SupervisorNode(Node):
             allow_hold_from_presence and self._debounced_present
         )
 
+        # Always publish each tick: default QoS is volatile; messages sent before the
+        # giga_serial_bridge subscribes are dropped. Republishing is cheap and the
+        # bridge skips duplicate HOLD/RUN when state already matches.
+        m = Bool()
+        m.data = want_hold
+        self._pub_hold.publish(m)
+
         if self._last_hold is None or want_hold != self._last_hold:
-            m = Bool()
-            m.data = want_hold
-            self._pub_hold.publish(m)
             self._last_hold = want_hold
             self.get_logger().info(
                 f"set_hold={want_hold} busy={self._interaction_busy} "
