@@ -32,6 +32,10 @@ class GigaSerialNode(Node):
         self.declare_parameter("serial_boot_delay_sec", 2.0)
         self.declare_parameter("sync_attempts", 6)
         self.declare_parameter("sync_response_timeout_sec", 3.0)
+        # Short per-line read during STATUS scan (full read_timeout is too slow × many lines).
+        self.declare_parameter("sync_line_poll_sec", 0.05)
+        # Run first STATUS sync after spin() starts (otherwise set_hold is ignored during long __init__).
+        self.declare_parameter("startup_sync_delay_sec", 0.15)
 
         port_raw = self.get_parameter("port").get_parameter_value().string_value
         port = resolve_port(port_raw)
@@ -66,6 +70,18 @@ class GigaSerialNode(Node):
             0.5,
             float(
                 self.get_parameter("sync_response_timeout_sec").get_parameter_value().double_value
+            ),
+        )
+        self._sync_line_poll = max(
+            0.01,
+            float(
+                self.get_parameter("sync_line_poll_sec").get_parameter_value().double_value
+            ),
+        )
+        self._startup_sync_delay = max(
+            0.0,
+            float(
+                self.get_parameter("startup_sync_delay_sec").get_parameter_value().double_value
             ),
         )
 
@@ -104,12 +120,14 @@ class GigaSerialNode(Node):
         self._srv_run = self.create_service(Trigger, "trigger_run", self._srv_run_cb)
         self._srv_sync = self.create_service(Trigger, "sync_status", self._srv_sync_cb)
 
-        self._sync_from_device()
         self._publish_hold_state()
 
         self.get_logger().info(
-            f"Giga serial open {port} @ {baud}; topics: set_hold, hold_active; "
-            "services: trigger_hold, trigger_run, sync_status"
+            f"Giga serial open {port} @ {baud}. Subscriptions active; "
+            f"startup STATUS sync in {self._startup_sync_delay:.2f}s after spin."
+        )
+        self._startup_timer = self.create_timer(
+            self._startup_sync_delay, self._startup_sync_callback
         )
 
     def destroy_node(self) -> bool:
@@ -133,6 +151,18 @@ class GigaSerialNode(Node):
             raw = self._ser.readline()
         return raw.decode("utf-8", errors="replace").strip()
 
+    def _read_line_with_timeout(self, timeout_sec: float) -> str:
+        """Single readline with a bounded wait (seconds)."""
+        t = max(0.001, float(timeout_sec))
+        with self._lock:
+            prev = self._ser.timeout
+            self._ser.timeout = t
+            try:
+                raw = self._ser.readline()
+            finally:
+                self._ser.timeout = prev
+        return raw.decode("utf-8", errors="replace").strip()
+
     def _drain_input(self) -> None:
         """Drop buffered RX (boot banner, TICK lines) so STATUS ack is readable."""
         with self._lock:
@@ -151,16 +181,26 @@ class GigaSerialNode(Node):
         predicate,
         overall_timeout_sec: float = 1.25,
         max_lines: int = 48,
+        line_poll_sec: float | None = None,
     ) -> str:
-        """Drain serial until predicate(line) or timeout. Returns last matching line or ""."""
-        end = time.monotonic() + overall_timeout_sec
+        """
+        Read lines until predicate matches or wall time / line budget exceeded.
+        line_poll_sec: max wait per readline (default: self._read_timeout).
+        """
+        poll = (
+            float(line_poll_sec)
+            if line_poll_sec is not None
+            else float(self._read_timeout)
+        )
+        poll = max(0.01, poll)
+        end = time.monotonic() + max(0.05, float(overall_timeout_sec))
         last_match = ""
-        for _ in range(max_lines):
-            if time.monotonic() > end:
+        for _ in range(max(1, int(max_lines))):
+            now = time.monotonic()
+            if now >= end:
                 break
-            line = self._read_line()
-            if not line:
-                continue
+            # Do not block longer than remaining wall time
+            line = self._read_line_with_timeout(min(poll, end - now))
             if predicate(line):
                 last_match = line
                 break
@@ -175,12 +215,16 @@ class GigaSerialNode(Node):
         last_reply = ""
         try:
             for attempt in range(self._sync_attempts):
+                self.get_logger().info(
+                    f"sync attempt {attempt + 1}/{self._sync_attempts}: STATUS -> Giga"
+                )
                 self._drain_input()
                 self._write_line("STATUS")
                 reply = self._read_lines_until(
                     is_status,
                     overall_timeout_sec=self._sync_response_timeout,
-                    max_lines=96,
+                    max_lines=120,
+                    line_poll_sec=self._sync_line_poll,
                 )
                 last_reply = reply
                 m = re.match(r"EXT_HOLD\s+([01])", reply)
@@ -207,6 +251,19 @@ class GigaSerialNode(Node):
         except Exception as e:
             self.get_logger().error(f"sync failed: {e}")
 
+    def _startup_sync_callback(self) -> None:
+        try:
+            self._startup_timer.cancel()
+        except Exception:
+            pass
+        self.get_logger().info("Running startup STATUS sync (serial)…")
+        self._sync_from_device()
+        self._publish_hold_state()
+        self.get_logger().info(
+            "Giga bridge ready: /giga/set_hold, /giga/hold_active, "
+            "trigger_hold | trigger_run | sync_status"
+        )
+
     def _send_hold(self, want_hold: bool) -> tuple[bool, str]:
         if want_hold == self._hold_active:
             return True, "already"
@@ -220,7 +277,12 @@ class GigaSerialNode(Node):
                     return u.startswith("OK HOLD") or u.startswith("ERR")
                 return u.startswith("OK RUN") or u.startswith("ERR")
 
-            reply = self._read_lines_until(is_ack)
+            reply = self._read_lines_until(
+                is_ack,
+                overall_timeout_sec=2.5,
+                max_lines=80,
+                line_poll_sec=max(self._sync_line_poll, 0.08),
+            )
             u = reply.upper()
             if want_hold and u.startswith("OK HOLD"):
                 self._hold_active = True
