@@ -18,14 +18,36 @@ source install/setup.bash
 
 If `python3-serial` is missing: `sudo apt install -y python3-serial`.
 
-## Full stack (three terminals)
+## Find the Giga USB device
 
-**1 — Giga serial bridge** (USB free, `SERIAL_LOG_VERBOSE 0` on the firmware):
+List candidates (Arduino / Giga / mbed scored first) and stable `/dev/serial/by-id/` links:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
-ros2 run giga_serial_bridge giga_serial_node --ros-args -p port:=/dev/ttyACM0
+ros2 run giga_serial_bridge list_giga_ports
+```
+
+Print **only** the auto-chosen path (for scripts):
+
+```bash
+ros2 run giga_serial_bridge list_giga_ports -- --best
+```
+
+(`--` separates ROS arguments from the script’s own flags.)  
+Add `-v` for VID/PID: `ros2 run giga_serial_bridge list_giga_ports -- -v`
+
+## Full stack (three terminals)
+
+**1 — Giga serial bridge** (USB free, `SERIAL_LOG_VERBOSE 0` on the firmware).  
+Default **`port:=auto`** picks a USB serial device (override if you have multiple Arduinos):
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ros2 run giga_serial_bridge giga_serial_node
+# explicit:  --ros-args -p port:=/dev/ttyACM1
+# or stable:  --ros-args -p port:=/dev/serial/by-id/usb-Arduino_GIGA_...
 ```
 
 **2 — Supervisor** (debounces faces + interaction → `/giga/set_hold`):

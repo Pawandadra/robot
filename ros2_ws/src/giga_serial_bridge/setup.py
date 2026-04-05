@@ -20,6 +20,7 @@ setup(
     entry_points={
         "console_scripts": [
             "giga_serial_node = giga_serial_bridge.giga_serial_node:main",
+            "list_giga_ports = giga_serial_bridge.port_discovery:main",
         ],
     },
 )

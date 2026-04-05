@@ -17,17 +17,29 @@ except ImportError as e:
         "python3-serial is required. On Ubuntu: sudo apt install python3-serial"
     ) from e
 
+from giga_serial_bridge.port_discovery import resolve_port
+
 
 class GigaSerialNode(Node):
     def __init__(self) -> None:
         # Topics: /giga/set_hold, /giga/hold_active; services under /giga/*
         super().__init__("serial_bridge", namespace="/giga")
 
-        self.declare_parameter("port", "/dev/ttyACM0")
+        self.declare_parameter("port", "auto")
         self.declare_parameter("baud_rate", 115200)
         self.declare_parameter("read_timeout_sec", 0.4)
 
-        port = self.get_parameter("port").get_parameter_value().string_value
+        port_raw = self.get_parameter("port").get_parameter_value().string_value
+        port = resolve_port(port_raw)
+        if not port:
+            self.get_logger().fatal(
+                "No serial port found. Plug in the Giga, then run:\n"
+                "  ros2 run giga_serial_bridge list_giga_ports\n"
+                "Or set parameter port:=/dev/ttyACM0 (or ttyACM1, …)."
+            )
+            raise RuntimeError("giga_serial_bridge: no serial port")
+        if port_raw.strip().lower() in ("auto", "scan", "detect", ""):
+            self.get_logger().info(f"port auto-selected: {port}")
         baud = self.get_parameter("baud_rate").get_parameter_value().integer_value
         if baud <= 0:
             baud = 115200
@@ -37,7 +49,14 @@ class GigaSerialNode(Node):
         if self._read_timeout <= 0.0:
             self._read_timeout = 0.4
 
-        self._ser = serial.Serial(port, baud, timeout=self._read_timeout)
+        try:
+            self._ser = serial.Serial(port, baud, timeout=self._read_timeout)
+        except serial.SerialException as e:
+            self.get_logger().fatal(
+                f"Could not open {port}: {e}. "
+                "Run: ros2 run giga_serial_bridge list_giga_ports"
+            )
+            raise
         self._lock = threading.Lock()
         self._hold_active = False
 
