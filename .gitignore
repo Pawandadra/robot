@@ -1,8 +1,0 @@
-.env
-.venv/
-__pycache__/
-data/faces/
-
-ros2_ws/build/
-ros2_ws/install/
-ros2_ws/log/

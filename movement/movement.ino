@@ -36,11 +36,14 @@
  * (15 pings) and readFrontsTripleFiltered (9). Cruise throttles fronts; REV_CLR uses front-only
  * scans on REV_CLR_SCAN_INTERVAL_MS. Verbose Serial adds latency — use SERIAL_LOG_VERBOSE 0 for demos.
  *
- * Host / ROS (USB Serial, SERIAL_BAUD): line-based commands from the laptop (newline-terminated):
+ * Host (USB Serial, SERIAL_BAUD): line-based commands from the laptop (newline-terminated).
+ * Giga R1 may show two /dev/ttyACM* ports; the PC must use the same one as the Serial Monitor
+ * (often ...-if00 in /dev/serial/by-id). Wrong port = no HOLD/RUN effect.
  *   HOLD   — stop motors; freeze navigation (no phase advance / sonar / stuck logic this loop).
- *   RUN    — resume autonomous navigation from current phase.
+ *   RUN    — resume autonomous navigation from current phase (straight / prior behavior).
+ *   RUN90  — release hold then pivot ~90° (L or R from preferRightNext) before cruise; use after greeting.
  *   STATUS or ? — reply with one line: EXT_HOLD 0|1
- * Replies: OK HOLD, OK RUN, or ERR <line>. For stable control + logging, set SERIAL_LOG_VERBOSE 0.
+ * Replies: OK HOLD, OK RUN, OK RUN90, or ERR <line>. For stable control + logging, set SERIAL_LOG_VERBOSE 0.
  */
 
 #include <string.h>
@@ -127,7 +130,7 @@ const unsigned long STUCK_REVERSE_MS = 1500UL;
 
 /** 1 = detailed Serial (decisions, phases, sanitize). 0 = minimal (boot + errors only). */
 #ifndef SERIAL_LOG_VERBOSE
-#define SERIAL_LOG_VERBOSE 1
+#define SERIAL_LOG_VERBOSE 0
 #endif
 /** Cruise status line interval (ms); includes last FL/FM/FR from throttled read. */
 #ifndef SERIAL_LOG_TICK_MS
@@ -213,6 +216,8 @@ static bool stuckRecoveryTurnLeft = true;
 
 /** USB host (laptop): when true, motors stopped and main navigation switch skipped. */
 static bool externalHoldActive = false;
+/** Set when host sends run90: next loop() after hold ends runs one 90° turn (not straight cruise). */
+static bool hostResumeTurn90Pending = false;
 
 static char rosCmdLineBuf[40];
 static uint8_t rosCmdLineLen = 0;
@@ -242,6 +247,13 @@ static void rosApplyLine(char *line) {
   if (strcmp(line, "run") == 0) {
     externalHoldActive = false;
     Serial.println(F("OK RUN"));
+    return;
+  }
+  if (strcmp(line, "run90") == 0) {
+    if (externalHoldActive)
+      hostResumeTurn90Pending = true;
+    externalHoldActive = false;
+    Serial.println(F("OK RUN90"));
     return;
   }
   if (strcmp(line, "status") == 0 || strcmp(line, "?") == 0) {
@@ -710,6 +722,15 @@ static bool commit90Right() {
   return true;
 }
 
+/** Host sent RUN90 after face interaction — pivot away instead of driving straight toward the person. */
+static void hostSchedule90TurnFromRelease() {
+  motorsStop();
+  if (preferRightNext)
+    commit90Right();
+  else
+    commit90Left();
+}
+
 /**
  * 90° after a recent turn: **only angled fronts FL/FR** (no side sensors — they still see the wall).
  * Uses sanitized ranges + tie band so spurious 300+ cm readings don’t alternate L/R every cycle.
@@ -1007,7 +1028,7 @@ void setup() {
   delay(50);
   computeManeuverTimings();
   Serial.println(F("=== robot movement.ino (3-front) Giga ==="));
-  Serial.println(F("Host USB: lines HOLD | RUN | STATUS | ? (newline)"));
+  Serial.println(F("Host USB: HOLD | RUN | RUN90 | STATUS | ? (newline)"));
   Serial.print(F("TURN_90 eff "));
   Serial.print(turnMs90());
   Serial.print(F(" TURN_45 eff "));
@@ -1054,6 +1075,12 @@ void loop() {
 
   if (externalHoldActive) {
     motorsStop();
+    return;
+  }
+
+  if (hostResumeTurn90Pending) {
+    hostResumeTurn90Pending = false;
+    hostSchedule90TurnFromRelease();
     return;
   }
 
