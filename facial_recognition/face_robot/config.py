@@ -28,10 +28,14 @@ HOLD_ABSENT_STREAK = int(os.getenv("HOLD_ABSENT_STREAK", "4"))
 HOLD_POST_INTERACTION_GRACE_SEC = float(os.getenv("HOLD_POST_INTERACTION_GRACE_SEC", "4.0"))
 # Extra stillness after spoken greetings (seconds); vision loop keeps ticking hold during wait.
 GREET_PAUSE_AFTER_KNOWN_SEC = float(os.getenv("GREET_PAUSE_AFTER_KNOWN_SEC", "1.5"))
-GREET_PAUSE_AFTER_ENROLL_SEC = float(os.getenv("GREET_PAUSE_AFTER_ENROLL_SEC", "2.0"))
+GREET_PAUSE_AFTER_ENROLL_SEC = float(
+    os.getenv("GREET_PAUSE_AFTER_ENROLL_SEC", "1.0")
+)
 GREET_PAUSE_AFTER_GROUP_SEC = float(os.getenv("GREET_PAUSE_AFTER_GROUP_SEC", "1.5"))
 
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "2"))
+# If set (e.g. http://pi:8080/stream.mjpg), OpenCV reads the robot camera over the network (Pi + mjpg-streamer).
+CAMERA_URL = os.getenv("CAMERA_URL", "").strip()
 ALLOW_CAMERA_FALLBACK = os.getenv("ALLOW_CAMERA_FALLBACK", "1") == "1"
 CAMERA_WIDTH = int(os.getenv("CAMERA_WIDTH", "640"))
 CAMERA_HEIGHT = int(os.getenv("CAMERA_HEIGHT", "480"))
@@ -73,7 +77,13 @@ RECOGNITION_STREAK = int(os.getenv("RECOGNITION_STREAK", "2"))
 UNKNOWN_STREAK = int(os.getenv("UNKNOWN_STREAK", "2"))
 UNKNOWN_COOLDOWN = float(os.getenv("UNKNOWN_COOLDOWN", "15"))
 ENROLLMENT_GRACE_PERIOD = float(os.getenv("ENROLLMENT_GRACE_PERIOD", "30"))
-ENROLLMENT_SAMPLES = int(os.getenv("ENROLLMENT_SAMPLES", "5"))
+ENROLLMENT_SAMPLES = int(os.getenv("ENROLLMENT_SAMPLES", "3"))
+# Enrollment-only: fewer jitters = faster encode (slightly noisier; OK for extra samples).
+ENROLLMENT_JITTERS = int(os.getenv("ENROLLMENT_JITTERS", "1"))
+# Pause between enrollment camera grabs (was 0.3s hardcoded).
+ENROLLMENT_FRAME_SLEEP_SEC = float(os.getenv("ENROLLMENT_FRAME_SLEEP_SEC", "0.08"))
+# Max camera attempts before giving up (avoids infinite loop if blur/detection fails).
+ENROLLMENT_MAX_TRIES = int(os.getenv("ENROLLMENT_MAX_TRIES", "18"))
 
 TTS_ENGINE = os.getenv("TTS_ENGINE", "piper").strip().lower()
 ESPEAK_VOICE = os.getenv("ESPEAK_VOICE", "en").strip()

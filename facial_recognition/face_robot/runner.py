@@ -250,18 +250,32 @@ def run():
                                     unknown_count = 0
                                     continue
 
+                                # Greet immediately after STT — enrollment runs after (feels much faster).
+                                voice.speak(f"Nice to meet you {person_name}")
+                                _pause_with_hold(
+                                    hold,
+                                    len(valid_faces),
+                                    True,
+                                    config.GREET_PAUSE_AFTER_ENROLL_SEC,
+                                )
+
                                 samples = []
                                 face_file_hash = None
-
-                                for _ in range(config.ENROLLMENT_SAMPLES):
+                                need = max(1, config.ENROLLMENT_SAMPLES)
+                                max_tries = max(need * 3, config.ENROLLMENT_MAX_TRIES)
+                                jitter_enroll = max(0, config.ENROLLMENT_JITTERS)
+                                gap = max(0.0, config.ENROLLMENT_FRAME_SLEEP_SEC)
+                                tries = 0
+                                while len(samples) < need and tries < max_tries:
+                                    tries += 1
                                     ret, frame = video.read()
                                     if not ret:
-                                        time.sleep(0.05)
+                                        time.sleep(0.04)
                                         if hold:
                                             hold.tick(0, True)
                                         continue
                                     if not vision.is_sharp_enough(frame):
-                                        time.sleep(0.05)
+                                        time.sleep(0.04)
                                         if hold:
                                             hold.tick(0, True)
                                         continue
@@ -270,7 +284,7 @@ def run():
                                     encs = face_recognition.face_encodings(
                                         rgb_i,
                                         faces,
-                                        num_jitters=config.FACE_ENCODING_JITTERS,
+                                        num_jitters=jitter_enroll,
                                     )
 
                                     primary_encoding, primary_box = vision.pick_primary_face(
@@ -287,21 +301,14 @@ def run():
                                             person_name,
                                         )
 
-                                    time.sleep(0.3)
+                                    if gap > 0:
+                                        time.sleep(gap)
                                     if hold:
                                         hold.tick(0, True)
 
                                 if len(samples) > 0:
                                     database.save_user(
                                         person_name, samples, face_file_hash=face_file_hash
-                                    )
-
-                                    voice.speak(f"Nice to meet you {person_name}")
-                                    _pause_with_hold(
-                                        hold,
-                                        len(valid_faces),
-                                        True,
-                                        config.GREET_PAUSE_AFTER_ENROLL_SEC,
                                     )
 
                                     existing_samples = known_samples.get(person_name, [])
@@ -316,6 +323,12 @@ def run():
                                     last_enrollment_time = time.time()
                                     unknown_count = 0
                                     enrollment_success = True
+                                else:
+                                    print(
+                                        "⚠️ Enrollment: no face encodings collected "
+                                        f"(tries {tries}). Increase ENROLLMENT_MAX_TRIES or "
+                                        "relax MIN_BLUR_SCORE."
+                                    )
                             finally:
                                 interaction_busy = False
                                 if hold:

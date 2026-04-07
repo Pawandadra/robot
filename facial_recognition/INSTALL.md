@@ -92,6 +92,7 @@ At minimum, set:
 | `SUPPRESS_AUDIO_BACKEND_NOISE` | `1` | Hide noisy stderr from some audio backends when `1`. |
 | `ENABLE_VOICE` | `1` | Disable all TTS when `0`. |
 | **Camera / mic** | | |
+| `CAMERA_URL` | *(empty)* | HTTP/RTSP URL for a remote stream (e.g. Pi MJPEG); if set, tried before local `CAMERA_INDEX`. |
 | `CAMERA_INDEX` | `2` | OpenCV camera index. |
 | `ALLOW_CAMERA_FALLBACK` | `1` | Try other indices if the configured camera fails. |
 | `CAMERA_WIDTH` | `640` | Capture width. |
@@ -121,7 +122,10 @@ At minimum, set:
 | `UNKNOWN_STREAK` | `2` | Frames of unknown before enrollment flow. |
 | `UNKNOWN_COOLDOWN` | `15` | Seconds before retrying unknown enrollment. |
 | `ENROLLMENT_GRACE_PERIOD` | `30` | Seconds after last enrollment before another. |
-| `ENROLLMENT_SAMPLES` | `5` | Number of encodings saved per enrollment. |
+| `ENROLLMENT_SAMPLES` | `3` | Number of encodings saved per enrollment (loop stops early when enough). |
+| `ENROLLMENT_JITTERS` | `1` | dlib jitters during enrollment only (lower = faster). |
+| `ENROLLMENT_FRAME_SLEEP_SEC` | `0.08` | Pause between enrollment camera grabs. |
+| `ENROLLMENT_MAX_TRIES` | `18` | Max capture attempts before giving up. |
 | **Speech-to-text** | | |
 | `STT_ENGINE` | `google` | `google` (online) or `vosk` (offline). |
 | `SPEECH_LANGUAGE` | `en-IN` | BCP-47 language for Google STT. |
@@ -145,6 +149,9 @@ At minimum, set:
 | `DB_PASSWORD` | *(empty)* | MySQL password. |
 | `DB_NAME` | `robot` | Database name. |
 | `FACE_FILES_DIR` | `data/faces` | Directory for enrolled face JPEG crops. |
+| **Giga (split setup)** | | |
+| `GIGA_SERIAL_PORT` | `auto` | Local device or `socket://host:port` when a Pi runs `pi_giga_tcp_bridge.py`. |
+| `GIGA_BOOT_DELAY_SEC` | `2.0` | After USB open (local only); use `0` with `socket://`. |
 
 ## 5. Speech-to-text notes
 
@@ -177,8 +184,127 @@ python main.py remove-user "FirstName"
 | `pkg_resources` / setuptools errors on Python 3.12+ | Keep `setuptools<81` from `requirements.txt`. |
 | Piper silent or errors | Confirm `piper --version`, model path, and that `.onnx` and `.onnx.json` sit beside each other; set `PIPER_BINARY` if needed. |
 | MySQL connection errors | `DB_*` in `.env`, user grants, and that MySQL is running. |
-</think>
+| Split setup: Giga not stopping | Pi bridge running? `GIGA_SERIAL_PORT=socket://pi-ip:7000`, firewall open, `GIGA_BOOT_DELAY_SEC=0`. |
 
+## 8. Laptop + Raspberry Pi (processing on laptop, hardware on robot)
 
-<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
-StrReplace
+Keep **MySQL**, **Python face app**, **Piper TTS**, and **`main.py`** on the **laptop**. On the **Pi** you only need: TCP → Giga serial, optional MJPEG camera stream, and (if you use it) network audio.
+
+### Motor control (Giga USB on the Pi)
+
+1. On the Pi, install pyserial: `pip install pyserial` or `sudo apt install python3-serial`.
+2. Copy `scripts/pi_giga_tcp_bridge.py` to the Pi (same repo path is fine).
+3. Run (adjust device if needed):
+
+   ```bash
+   python3 pi_giga_tcp_bridge.py --device /dev/ttyACM0 --port 7000
+   ```
+
+4. On the **laptop** `.env`, point pyserial at the Pi:
+
+   ```env
+   GIGA_SERIAL_PORT=socket://192.168.x.x:7000
+   GIGA_BOOT_DELAY_SEC=0
+   ```
+
+Use the Pi’s real IP or hostname. **Wi‑Fi latency** is usually fine for `HOLD` / `RUN`; keep one client only (`main.py`).
+
+### Pi USB webcam with **built-in microphone** (video + STT mic)
+
+Goal: **same UVC device** on the Pi sends **MJPEG** to the laptop for OpenCV, and the **mic** appears as a normal input on the **laptop** for `speech_input`—without sending Piper TTS to the Pi (TTS stays on the laptop speakers).
+
+#### 1) On the Pi: check video and ALSA
+
+```bash
+v4l2-ctl --list-devices          # note /dev/video0 (or video1)
+arecord -l                       # note card,device for the webcam mic
+arecord -d 3 -f cd test.wav && aplay test.wav   # quick mic test
+```
+
+If the mic does not show up as a separate capture device, use **PulseAudio / PipeWire** on the Pi and pick the webcam’s **input** in `pavucontrol` once.
+
+#### 2) On the Pi: MJPEG HTTP stream (for `CAMERA_URL`)
+
+Install and run something that exposes **Motion JPEG over HTTP** from `/dev/videoX` (choose one):
+
+- **mjpg-streamer** ([jacksonliam/mjpg-streamer](https://github.com/jacksonliam/mjpg-streamer)) — typical URL: `http://<pi-ip>:8080/?action=stream`  
+- Or **`ffmpeg`** publishing MJPEG over HTTP (many tutorials online).
+
+Keep resolution modest (e.g. **640×480**, **10–15 fps**) so the Pi 3B+ keeps up.
+
+**Firewall** on the Pi: allow the HTTP port (e.g. **8080**) from the laptop only.
+
+On the **laptop** `.env`:
+
+```env
+CAMERA_URL=http://192.168.x.x:8080/?action=stream
+```
+
+(`CAMERA_URL` is tried first; local `CAMERA_INDEX` is only a fallback.)
+
+#### 3) On the Pi: PulseAudio network (so the **mic** is visible on the laptop)
+
+`main.py` uses **PyAudio on the laptop**, so the Pi mic must show up as a **local** capture device on the laptop. The usual way is a **PulseAudio tunnel** (do **not** set global `PULSE_SERVER` for the whole app—that can route **TTS** to the Pi).
+
+**On the Pi** (PulseAudio; Raspberry Pi OS often has `pulseaudio` per user):
+
+1. Allow TCP from your LAN (edit `~/.config/pulse/default.pa` or `/etc/pulse/default.pa`, then restart Pulse):
+
+   ```text
+   load-module module-native-protocol-tcp auth-ip-acl=127.0.0.1;192.168.0.0/24 auth-anonymous=1
+   ```
+
+   Tighten `auth-ip-acl` to the laptop’s IP for security.
+
+2. Reload Pulse (example): `pulseaudio -k; pulseaudio --start` (or reboot).
+
+3. List the **exact source name** for the webcam mic:
+
+   ```bash
+   pactl list sources short
+   ```
+
+   Example name: `alsa_input.usb-046d_Logitech_Webcam_...-00.analog-stereo`
+
+**Firewall** on the Pi: allow TCP **4713** from the laptop.
+
+**On the laptop** (same LAN):
+
+1. Create a **tunnel source** that mirrors the Pi’s mic:
+
+   ```bash
+   pactl load-module module-tunnel-source \
+     server=tcp:192.168.x.x:4713 \
+     source=alsa_input.usb-.....-00.analog-stereo
+   ```
+
+   Use the **exact** `source=` string from the Pi’s `pactl list sources short`.
+
+2. List inputs on the laptop and pick the new device:
+
+   ```bash
+   python3 -c "import pyaudio; pa=pyaudio.PyAudio(); [print(i, pa.get_device_info_by_index(i)['name']) for i in range(pa.get_device_count()) if pa.get_device_info_by_index(i)['maxInputChannels']>=1]"
+   ```
+
+3. In `.env`, point the app at that device:
+
+   ```env
+   MIC_NAME_HINT=Tunnel        # substring of the tunnel source name on the laptop
+   ```
+
+   or set **`MIC_INDEX`** to the number printed for the tunnel input.
+
+**PipeWire on the Pi:** If the Pi uses PipeWire instead of Pulse, enable **PulseAudio compatibility** (socket) or use `pw-cli` / documentation for “network source”; the idea is the same: **a laptop-local virtual mic** fed from the Pi.
+
+#### 4) Checklist
+
+| Piece | Where | Check |
+|--------|--------|--------|
+| Video | Laptop `CAMERA_URL` | Browser or `ffplay` opens MJPEG URL |
+| Mic | Laptop PyAudio | `MIC_NAME_HINT` / `MIC_INDEX` selects tunnel |
+| Motors | Laptop `.env` | `GIGA_SERIAL_PORT=socket://pi-ip:7000` + bridge on Pi |
+| DB / Piper / STT | Laptop | Unchanged (`DB_HOST=localhost`, etc.) |
+
+### Database
+
+MySQL can stay on the **laptop** (`DB_HOST=localhost`). For a shared DB on the Pi, set `DB_HOST` to the Pi’s IP and grant MySQL user access from the laptop’s address.

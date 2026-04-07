@@ -1,3 +1,5 @@
+import time
+
 import cv2
 import face_recognition
 import numpy as np
@@ -30,6 +32,20 @@ def iou(a, b):
 
 
 def open_camera():
+    url = getattr(config, "CAMERA_URL", "") or ""
+    if url:
+        print(f"Opening CAMERA_URL stream…")
+        cam = cv2.VideoCapture(url)
+        if cam.isOpened():
+            for _ in range(8):
+                ok, frame = cam.read()
+                if ok and frame is not None and frame.size > 0:
+                    print("✅ Camera opened from URL stream")
+                    return cam
+                time.sleep(0.08)
+        cam.release()
+        print("❌ CAMERA_URL failed to deliver frames; falling back to local cameras.")
+
     candidates = [config.CAMERA_INDEX]
     if config.ALLOW_CAMERA_FALLBACK:
         candidates.extend([0, 1, 2, 3, 4, 5])
@@ -58,6 +74,12 @@ def open_camera():
 
 def configure_capture(video):
     if video is None:
+        return
+    if getattr(config, "CAMERA_URL", ""):
+        try:
+            video.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
         return
     video.set(3, config.CAMERA_WIDTH)
     video.set(4, config.CAMERA_HEIGHT)

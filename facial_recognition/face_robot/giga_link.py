@@ -77,7 +77,7 @@ def _best_device_from_serial_by_id() -> Optional[str]:
 
 
 def resolve_giga_port(port: str) -> Optional[str]:
-    """auto/scan/empty -> best guess; else return path as-is."""
+    """auto/scan/empty -> best guess; else return path or URL as-is."""
     key = port.strip().lower()
     if key and key not in ("auto", "scan", "detect", ""):
         return port.strip()
@@ -103,6 +103,27 @@ def resolve_giga_port(port: str) -> Optional[str]:
     return ranked[0][1]
 
 
+def _open_serial(device: str, baud: int):
+    """Local /dev/tty* or pyserial URL (socket://, rfc2217://)."""
+    d = device.strip()
+    dl = d.lower()
+    if dl.startswith("socket://") or dl.startswith("rfc2217://"):
+        return serial.serial_for_url(
+            d,
+            baudrate=baud,
+            timeout=0.2,
+            write_timeout=2.0,
+        )
+    return serial.Serial(
+        d,
+        baud,
+        timeout=0.2,
+        write_timeout=2.0,
+        dsrdtr=False,
+        rtscts=False,
+    )
+
+
 class GigaSerial:
     """
     Send HOLD/RUN only when the desired state changes.
@@ -119,16 +140,13 @@ class GigaSerial:
         debug: bool = False,
     ) -> None:
         self._debug = debug
-        # dsrdtr/rtscts False: avoid extra control-line toggles on mbed CDC (can confuse the Giga).
-        self._ser = serial.Serial(
-            device,
-            baud,
-            timeout=0.2,
-            write_timeout=2.0,
-            dsrdtr=False,
-            rtscts=False,
-        )
-        if boot_delay_sec > 0:
+        self._device = device.strip()
+        self._ser = _open_serial(self._device, baud)
+        # Opening a TCP bridge does not reset the Giga; USB boot delay is only for local open serial.
+        dl = self._device.lower()
+        if boot_delay_sec > 0 and not (
+            dl.startswith("socket://") or dl.startswith("rfc2217://")
+        ):
             time.sleep(boot_delay_sec)
         self._drain_rx()
         self._last_hold: bool | None = None
@@ -152,7 +170,7 @@ class GigaSerial:
             self._ser.flush()
             self._last_hold = True
             if self._debug:
-                print(f"[Giga] HOLD -> {self._ser.port}")
+                print(f"[Giga] HOLD -> {getattr(self._ser, 'port', self._device)}")
             return
         # release (RUN or RUN90 — RUN90 pivots ~90° on firmware before cruise)
         if resume_with_90_turn:
@@ -160,7 +178,7 @@ class GigaSerial:
             self._ser.flush()
             self._last_hold = False
             if self._debug:
-                print(f"[Giga] RUN90 -> {self._ser.port}")
+                print(f"[Giga] RUN90 -> {getattr(self._ser, 'port', self._device)}")
             return
         if self._last_hold is False:
             return
@@ -168,7 +186,7 @@ class GigaSerial:
         self._ser.flush()
         self._last_hold = False
         if self._debug:
-            print(f"[Giga] RUN -> {self._ser.port}")
+            print(f"[Giga] RUN -> {getattr(self._ser, 'port', self._device)}")
 
     def pulse_hold(self) -> None:
         """Send HOLD again (already in hold state). Recovers from missed USB lines."""
@@ -177,7 +195,7 @@ class GigaSerial:
         self._ser.write(b"HOLD\r\n")
         self._ser.flush()
         if self._debug:
-            print(f"[Giga] HOLD (pulse) -> {self._ser.port}")
+            print(f"[Giga] HOLD (pulse) -> {getattr(self._ser, 'port', self._device)}")
 
     def close(self) -> None:
         if self._ser.is_open:
@@ -193,14 +211,21 @@ def open_giga_optional(
 ) -> Optional[GigaSerial]:
     path = resolve_giga_port(port_raw)
     if not path:
-        print("⚠️ Giga: no serial port (set GIGA_SERIAL_PORT=/dev/ttyACM0 or /dev/serial/by-id/...)")
+        print(
+            "⚠️ Giga: no serial port (set GIGA_SERIAL_PORT=/dev/ttyACM0, "
+            "socket://pi-ip:7000, or /dev/serial/by-id/...)"
+        )
         return None
     try:
         g = GigaSerial(path, baud=baud, boot_delay_sec=boot_delay_sec, debug=debug)
         hint = ""
-        if port_raw.strip().lower() in ("auto", "scan", "detect", ""):
+        pl = port_raw.strip().lower()
+        if pl in ("auto", "scan", "detect", ""):
             hint = " (auto: prefer /dev/serial/by-id/*GIGA*if00*; if still no stop, try ttyACM1)"
-        print(f"✅ Giga USB: {path} @ {baud}{hint}")
+        if path.lower().startswith("socket://"):
+            print(f"✅ Giga via TCP: {path} (run serial bridge on Pi — see INSTALL.md){hint}")
+        else:
+            print(f"✅ Giga USB: {path} @ {baud}{hint}")
         return g
     except serial.SerialException as e:
         print(f"⚠️ Giga serial not opened: {e}")
