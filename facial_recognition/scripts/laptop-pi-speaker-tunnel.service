@@ -1,0 +1,21 @@
+# Install: ~/.config/systemd/user/laptop-pi-speaker-tunnel.service
+# Edit ExecStart path if your repo is not ~/Documents/robot/facial_recognition
+#
+# Requires ROBOT_PI_SINK in ~/.config/robot-pi-mic.env (see robot-pi-mic.env.example).
+# If unset, the script exits 0 and does nothing.
+#
+#   systemctl --user enable --now laptop-pi-speaker-tunnel.service
+
+[Unit]
+Description=Robot Pi speaker (Pulse tunnel: laptop TTS -> Pi audio out)
+After=pipewire.service pipewire-pulse.service
+Wants=pipewire-pulse.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/sleep 4
+ExecStart=%h/Documents/robot/facial_recognition/scripts/laptop_pi_speaker_tunnel.sh
+
+[Install]
+WantedBy=default.target

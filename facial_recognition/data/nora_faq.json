@@ -1,0 +1,56 @@
+[
+  {
+    "patterns": [
+      "what is your name",
+      "what's your name",
+      "whats your name",
+      "who are you",
+      "tell me your name"
+    ],
+    "answer": "I am NORA, the Name Oriented Robotic Assistant."
+  },
+  {
+    "patterns": [
+      "how are you",
+      "how do you do",
+      "how's it going",
+      "how is it going"
+    ],
+    "answer": "I am fine, thank you. How are you?"
+  },
+  {
+    "patterns": [
+      "hello",
+      "hi",
+      "hey",
+      "good morning",
+      "good afternoon",
+      "good evening"
+    ],
+    "answer": "Hello! I am NORA. How can I help you?"
+  },
+  {
+    "patterns": [
+      "what can you do",
+      "what do you do",
+      "help me",
+      "can you help"
+    ],
+    "answer": "I can recognize people, learn new names, and chat with you. Ask me what my name is!"
+  },
+  {
+    "patterns": [
+      "thank you",
+      "thanks"
+    ],
+    "answer": "You are welcome."
+  },
+  {
+    "patterns": [
+      "bye",
+      "goodbye",
+      "see you"
+    ],
+    "answer": "Goodbye! Nice talking with you."
+  }
+]

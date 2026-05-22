@@ -229,4 +229,14 @@ def open_giga_optional(
         return g
     except serial.SerialException as e:
         print(f"⚠️ Giga serial not opened: {e}")
+        msg = str(e).lower()
+        pl = (path or "").lower()
+        if "socket://" not in pl and (
+            "input/output" in msg or "could not configure" in msg or "errno 5" in msg
+        ):
+            print(
+                "   Hint: Giga not on this machine’s USB? Use UART to Pi + on the Pi run "
+                "pi_giga_tcp_bridge.py, then set GIGA_SERIAL_PORT=socket://<pi-ip>:7000 "
+                "and GIGA_BOOT_DELAY_SEC=0 here."
+            )
         return None

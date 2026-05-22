@@ -41,11 +41,18 @@ CAMERA_WIDTH = int(os.getenv("CAMERA_WIDTH", "640"))
 CAMERA_HEIGHT = int(os.getenv("CAMERA_HEIGHT", "480"))
 
 MIC_INDEX = int(os.getenv("MIC_INDEX", "1"))
-MIC_NAME_HINT = os.getenv("MIC_NAME_HINT", "fingers")
+MIC_NAME_HINT = os.getenv("MIC_NAME_HINT", "fingers").strip()
+# When CAMERA_URL is set (Pi camera), try these PyAudio name substrings before falling back to MIC_INDEX / first device (Pulse tunnel from Pi).
+MIC_TUNNEL_HINTS = os.getenv("MIC_TUNNEL_HINTS", "robot_pi,tunnel").strip()
 MIC_SAMPLE_RATE = int(os.getenv("MIC_SAMPLE_RATE", "16000"))
 MIC_CHUNK_SIZE = int(os.getenv("MIC_CHUNK_SIZE", "1024"))
 MIC_AMBIENT_DURATION = float(os.getenv("MIC_AMBIENT_DURATION", "0.1"))
-MIC_MIN_ENERGY = int(os.getenv("MIC_MIN_ENERGY", "120"))
+MIC_MIN_ENERGY = int(os.getenv("MIC_MIN_ENERGY", "80"))
+# After adjust_for_ambient_noise, threshold *= this (lower = more sensitive; Pi tunnel mics often need ~0.35–0.55).
+MIC_AFTER_CALIB_MULT = max(
+    0.15,
+    min(float(os.getenv("MIC_AFTER_CALIB_MULT", "0.5")), 1.0),
+)
 
 TOLERANCE = float(os.getenv("FACE_TOLERANCE", "0.42"))
 FRAME_SCALE = float(os.getenv("FRAME_SCALE", "0.5"))
@@ -62,10 +69,26 @@ TRACK_CACHE_SECONDS = float(os.getenv("TRACK_CACHE_SECONDS", "1.0"))
 TRACK_IOU_THRESHOLD = float(os.getenv("TRACK_IOU_THRESHOLD", "0.45"))
 EXIT_RESET_SECONDS = float(os.getenv("EXIT_RESET_SECONDS", "5.0"))
 
-NAME_TIMEOUT = float(os.getenv("NAME_TIMEOUT", "10"))
-NAME_PHRASE_TIME_LIMIT = float(os.getenv("NAME_PHRASE_TIME_LIMIT", "8"))
+NAME_TIMEOUT = float(os.getenv("NAME_TIMEOUT", "15"))
+NAME_PHRASE_TIME_LIMIT = float(os.getenv("NAME_PHRASE_TIME_LIMIT", "10"))
+# Wait after TTS question before opening mic (lets playback finish + you start speaking).
+NAME_LISTEN_AFTER_TTS_SEC = float(os.getenv("NAME_LISTEN_AFTER_TTS_SEC", "0.7"))
 
 STT_ENGINE = os.getenv("STT_ENGINE", "google").strip().lower()
+
+# Local Q&A (data/nora_faq.json): answers stay local; listening uses Google STT (same as accuracy).
+ENABLE_LOCAL_FAQ = os.getenv("ENABLE_LOCAL_FAQ", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+FAQ_JSON_PATH = os.getenv("FAQ_JSON_PATH", "").strip()
+FAQ_POLL_INTERVAL_SEC = float(os.getenv("FAQ_POLL_INTERVAL_SEC", "12"))
+FAQ_COOLDOWN_AFTER_ANSWER_SEC = float(os.getenv("FAQ_COOLDOWN_AFTER_ANSWER_SEC", "8"))
+# Google listen for FAQ (short; uses SPEECH_LANGUAGE / SPEECH_ALT_LANGUAGE).
+FAQ_GOOGLE_TIMEOUT = float(os.getenv("FAQ_GOOGLE_TIMEOUT", "5"))
+FAQ_GOOGLE_PHRASE_LIMIT = float(os.getenv("FAQ_GOOGLE_PHRASE_LIMIT", "7"))
+FAQ_GOOGLE_AMBIENT_SEC = float(os.getenv("FAQ_GOOGLE_AMBIENT_SEC", "0.12"))
 SPEECH_LANGUAGE = os.getenv("SPEECH_LANGUAGE", "en-IN").strip()
 SPEECH_ALT_LANGUAGE = os.getenv("SPEECH_ALT_LANGUAGE", "").strip()
 VOSK_MODEL_PATH = os.getenv("VOSK_MODEL_PATH", "/opt/vosk/models").strip()
@@ -94,6 +117,8 @@ PIPER_MODEL = os.getenv(
     "/opt/piper/models/en_US-lessac-medium.onnx",
 ).strip()
 PIPER_LENGTH_SCALE = float(os.getenv("PIPER_LENGTH_SCALE", "0.9"))
+# paplay only: Pulse stream volume 0–65536 (65536=100%). 0 = omit -v (Pulse default). e.g. 98304 ≈ 150%.
+PAPLAY_VOLUME = int(os.getenv("PAPLAY_VOLUME", "0"))
 
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_USER = os.getenv("DB_USER", "robot")

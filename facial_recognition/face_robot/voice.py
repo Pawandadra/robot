@@ -29,6 +29,17 @@ def play_wav(path):
     command = [audio_player_wav, path]
     if os.path.basename(audio_player_wav) == "aplay":
         command = [audio_player_wav, "-q", path]
+    elif (
+        os.path.basename(audio_player_wav) == "paplay"
+        and config.PAPLAY_VOLUME > 0
+        and config.PAPLAY_VOLUME <= 131072
+    ):
+        command = [
+            audio_player_wav,
+            "-v",
+            str(config.PAPLAY_VOLUME),
+            path,
+        ]
 
     with suppress_stderr():
         subprocess.run(command, check=True)

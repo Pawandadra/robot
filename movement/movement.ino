@@ -36,8 +36,10 @@
  * (15 pings) and readFrontsTripleFiltered (9). Cruise throttles fronts; REV_CLR uses front-only
  * scans on REV_CLR_SCAN_INTERVAL_MS. Verbose Serial adds latency — use SERIAL_LOG_VERBOSE 0 for demos.
  *
- * Host (USB Serial, SERIAL_BAUD): line-based commands from the laptop (newline-terminated).
- * Giga R1 may show two /dev/ttyACM* ports; the PC must use the same one as the Serial Monitor
+ * Host (SERIAL_BAUD): line-based commands from the laptop/Pi (newline-terminated).
+ * USB: default `Serial`. UART to Raspberry Pi: set HOST_USE_SERIAL1 1 — then `Serial1`
+ * (Giga R1: TX1/RX1 are typically D18/D19; Pi GPIO14 TX→Giga RX, GPIO15 RX←Giga TX, GND↔GND).
+ * Giga on USB only may show two /dev/ttyACM* ports; use the same one as Serial Monitor
  * (often ...-if00 in /dev/serial/by-id). Wrong port = no HOLD/RUN effect.
  *   HOLD   — stop motors; freeze navigation (no phase advance / sonar / stuck logic this loop).
  *   RUN    — resume autonomous navigation from current phase (straight / prior behavior).
@@ -68,6 +70,18 @@
 #define TRIG_RIGHT 28
 #define ECHO_RIGHT 29
 
+/**
+ * Disable L/R side sonar logic.
+ *
+ * When set to 1, the robot will NOT use LEFT/RIGHT sensors for turn planning or
+ * reverse-exit decisions; it will rely on FL/FM/FR only.
+ *
+ * This prevents behavior where the robot keeps reversing waiting for side clearance.
+ */
+#ifndef DISABLE_SIDE_SONARS
+#define DISABLE_SIDE_SONARS 1
+#endif
+
 /** 0–255 at 8-bit PWM (see setup). Raise for faster cruise / turns. */
 const uint8_t SPEED_LEFT = 150;
 const uint8_t SPEED_RIGHT = 150;
@@ -93,7 +107,8 @@ const unsigned long REV_CLR_SCAN_INTERVAL_MS = 72UL;
 const float WHEEL_DIAMETER_CM = 6.35f;
 const float MOTOR_RPM = 200.0f;
 const float MOTOR_LOAD_FACTOR = 0.65f;
-const float REVERSE_EXTRA_CM = 30.0f;
+// Keep reverse movements small; large backing can oscillate in tight spaces.
+const float REVERSE_EXTRA_CM = 15.0f;
 const float REVERSE_EXTRA_CALIB = 1.12f;
 
 /** Base pivot time at PWM 150; multiply by TURN_CALIB on your floor (Giga: tune here). */
@@ -126,6 +141,20 @@ const unsigned long STUCK_REVERSE_MS = 1500UL;
 
 #ifndef SERIAL_BAUD
 #define SERIAL_BAUD 115200
+#endif
+
+/**
+ * 0 = host commands on USB `Serial` (default).
+ * 1 = host commands on `Serial1` (3.3 V UART to Pi). Debug logs stay on USB `Serial`.
+ */
+#ifndef HOST_USE_SERIAL1
+#define HOST_USE_SERIAL1 1
+#endif
+
+#if HOST_USE_SERIAL1
+#define HOST_SERIAL Serial1
+#else
+#define HOST_SERIAL Serial
 #endif
 
 /** 1 = detailed Serial (decisions, phases, sanitize). 0 = minimal (boot + errors only). */
@@ -241,34 +270,34 @@ static void rosApplyLine(char *line) {
   rosToLowerAscii(line);
   if (strcmp(line, "hold") == 0) {
     externalHoldActive = true;
-    Serial.println(F("OK HOLD"));
+    HOST_SERIAL.println(F("OK HOLD"));
     return;
   }
   if (strcmp(line, "run") == 0) {
     externalHoldActive = false;
-    Serial.println(F("OK RUN"));
+    HOST_SERIAL.println(F("OK RUN"));
     return;
   }
   if (strcmp(line, "run90") == 0) {
     if (externalHoldActive)
       hostResumeTurn90Pending = true;
     externalHoldActive = false;
-    Serial.println(F("OK RUN90"));
+    HOST_SERIAL.println(F("OK RUN90"));
     return;
   }
   if (strcmp(line, "status") == 0 || strcmp(line, "?") == 0) {
-    Serial.print(F("EXT_HOLD "));
-    Serial.println(externalHoldActive ? '1' : '0');
+    HOST_SERIAL.print(F("EXT_HOLD "));
+    HOST_SERIAL.println(externalHoldActive ? '1' : '0');
     return;
   }
-  Serial.print(F("ERR "));
-  Serial.println(line);
+  HOST_SERIAL.print(F("ERR "));
+  HOST_SERIAL.println(line);
 }
 
 /** Non-blocking: accumulate bytes until \\n or \\r, then handle one command line. */
 static void pollHostUsbCommands() {
-  while (Serial.available() > 0) {
-    int ri = Serial.read();
+  while (HOST_SERIAL.available() > 0) {
+    int ri = HOST_SERIAL.read();
     if (ri < 0)
       break;
     char c = (char)ri;
@@ -327,6 +356,9 @@ static void recordTrapFailure() {
 }
 
 static bool useFrontOnlyPlanning() {
+#if DISABLE_SIDE_SONARS
+  return true;
+#endif
   return postTurnFrontOnlyActive() || layerBActive();
 }
 
@@ -564,6 +596,11 @@ static void readFrontsTripleFiltered(int &fL, int &fM, int &fR) {
 
 static void readAllFrontsAndSidesFiltered(int &fL, int &fM, int &fR, int &l, int &r) {
   readFrontsTripleFiltered(fL, fM, fR);
+#if DISABLE_SIDE_SONARS
+  l = 999;
+  r = 999;
+  return;
+#endif
   delay(BETWEEN_SENSORS_MS);
   l = readCmMinOfValid3(TRIG_LEFT, ECHO_LEFT);
   delay(BETWEEN_SENSORS_MS);
@@ -627,6 +664,18 @@ static bool frontsClearForCruise(int fL, int fM, int fR) {
 
 /** Leave reverse-clear: all three open, or center + one wing (one dead/noisy sensor won’t trap you). */
 static bool reverseFrontsOpenEnough(int fL, int fM, int fR) {
+  // IMPORTANT: During reverse-clear, treat "no echo" (≈999) as likely OPEN, not blocked.
+  // Otherwise a disconnected/noisy front sensor can cause endless reverse loops.
+  if (fL >= 998 && fM >= 998 && fR >= 998)
+    return true;
+  // Center missing but a wing is open → proceed.
+  if (fM >= 998 && (farEnough(fL) || farEnough(fR)))
+    return true;
+  // One wing missing but center + other wing are open → proceed.
+  if (fL >= 998 && farEnough(fM) && farEnough(fR))
+    return true;
+  if (fR >= 998 && farEnough(fM) && farEnough(fL))
+    return true;
   if (farEnough(fL) && farEnough(fM) && farEnough(fR))
     return true;
   if (farEnough(fM) && farEnough(fL))
@@ -889,7 +938,12 @@ static bool planPrepManeuver(int fL, int fM, int fR, int l, int r) {
       return true;
     if (plan90TurnSafe(fL, fR, l, r))
       return true;
-    LOG_PREP_LN("fallback reverse");
+    // Minimize reversing: if at least one corner is usable, pivot rather than backing up.
+    if (cornerOkForTurn(fL) || cornerOkForTurn(fR)) {
+      LOG_PREP_LN("fallback pivot 90 (min-rev)");
+      return plan90TurnSafeFrontOnly(fL, fR);
+    }
+    LOG_PREP_LN("fallback reverse (critical: no corner)");
     enterReverseClear();
     return true;
   }
@@ -900,7 +954,11 @@ static bool planPrepManeuver(int fL, int fM, int fR, int l, int r) {
       return true;
     if (plan90TurnSafe(fL, fR, l, r))
       return true;
-    LOG_PREP_LN("fallback reverse");
+    if (cornerOkForTurn(fL) || cornerOkForTurn(fR)) {
+      LOG_PREP_LN("fallback pivot 90 (min-rev)");
+      return plan90TurnSafeFrontOnly(fL, fR);
+    }
+    LOG_PREP_LN("fallback reverse (critical: no corner)");
     enterReverseClear();
     return true;
   }
@@ -911,7 +969,11 @@ static bool planPrepManeuver(int fL, int fM, int fR, int l, int r) {
       return true;
     if (plan90TurnSafe(fL, fR, l, r))
       return true;
-    LOG_PREP_LN("fallback reverse");
+    if (cornerOkForTurn(fL) || cornerOkForTurn(fR)) {
+      LOG_PREP_LN("fallback pivot 90 (min-rev)");
+      return plan90TurnSafeFrontOnly(fL, fR);
+    }
+    LOG_PREP_LN("fallback reverse (critical: no corner)");
     enterReverseClear();
     return true;
   }
@@ -922,7 +984,11 @@ static bool planPrepManeuver(int fL, int fM, int fR, int l, int r) {
       return true;
     if (plan90TurnSafe(fL, fR, l, r))
       return true;
-    LOG_PREP_LN("fallback reverse");
+    if (cornerOkForTurn(fL) || cornerOkForTurn(fR)) {
+      LOG_PREP_LN("fallback pivot 90 (min-rev)");
+      return plan90TurnSafeFrontOnly(fL, fR);
+    }
+    LOG_PREP_LN("fallback reverse (critical: no corner)");
     enterReverseClear();
     return true;
   }
@@ -931,7 +997,11 @@ static bool planPrepManeuver(int fL, int fM, int fR, int l, int r) {
     LOG_PREP_LN("zone BOTH_WINGS (clear FM) -> 90 or rev");
     if (plan90TurnSafe(fL, fR, l, r))
       return true;
-    LOG_PREP_LN("fallback reverse");
+    if (cornerOkForTurn(fL) || cornerOkForTurn(fR)) {
+      LOG_PREP_LN("fallback pivot 90 (min-rev)");
+      return plan90TurnSafeFrontOnly(fL, fR);
+    }
+    LOG_PREP_LN("fallback reverse (critical: no corner)");
     enterReverseClear();
     return true;
   }
@@ -940,7 +1010,11 @@ static bool planPrepManeuver(int fL, int fM, int fR, int l, int r) {
     LOG_PREP_LN("zone CENTER_FM -> 90 or rev");
     if (plan90TurnSafe(fL, fR, l, r))
       return true;
-    LOG_PREP_LN("fallback reverse");
+    if (cornerOkForTurn(fL) || cornerOkForTurn(fR)) {
+      LOG_PREP_LN("fallback pivot 90 (min-rev)");
+      return plan90TurnSafeFrontOnly(fL, fR);
+    }
+    LOG_PREP_LN("fallback reverse (critical: no corner)");
     enterReverseClear();
     return true;
   }
@@ -950,7 +1024,11 @@ static bool planPrepManeuver(int fL, int fM, int fR, int l, int r) {
     LOG_PREP_LN("hysteresis -> try 90 then rev");
     if (plan90TurnSafe(fL, fR, l, r))
       return true;
-    LOG_PREP_LN("fallback reverse");
+    if (cornerOkForTurn(fL) || cornerOkForTurn(fR)) {
+      LOG_PREP_LN("fallback pivot 90 (min-rev)");
+      return plan90TurnSafeFrontOnly(fL, fR);
+    }
+    LOG_PREP_LN("fallback reverse (critical: no corner)");
     enterReverseClear();
     return true;
   }
@@ -958,7 +1036,11 @@ static bool planPrepManeuver(int fL, int fM, int fR, int l, int r) {
   LOG_PREP_LN("zone FALLTHROUGH -> 90 then rev");
   if (plan90TurnSafe(fL, fR, l, r))
     return true;
-  LOG_PREP_LN("fallback reverse");
+  if (cornerOkForTurn(fL) || cornerOkForTurn(fR)) {
+    LOG_PREP_LN("fallback pivot 90 (min-rev)");
+    return plan90TurnSafeFrontOnly(fL, fR);
+  }
+  LOG_PREP_LN("fallback reverse (critical: no corner)");
   enterReverseClear();
   return true;
 }
@@ -1022,13 +1104,21 @@ void setup() {
 
   motorsStop();
   Serial.begin(SERIAL_BAUD);
+#if HOST_USE_SERIAL1
+  Serial1.begin(SERIAL_BAUD);
+#else
   unsigned long t0 = millis();
   while (!Serial && (millis() - t0 < 2000UL)) {
   }
+#endif
   delay(50);
   computeManeuverTimings();
   Serial.println(F("=== robot movement.ino (3-front) Giga ==="));
+#if HOST_USE_SERIAL1
+  Serial.println(F("Host UART Serial1: HOLD | RUN | RUN90 | STATUS | ? (newline)"));
+#else
   Serial.println(F("Host USB: HOLD | RUN | RUN90 | STATUS | ? (newline)"));
+#endif
   Serial.print(F("TURN_90 eff "));
   Serial.print(turnMs90());
   Serial.print(F(" TURN_45 eff "));

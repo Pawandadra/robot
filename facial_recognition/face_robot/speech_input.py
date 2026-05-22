@@ -1,9 +1,14 @@
+import subprocess
+import threading
 import time
 
 import json
 import os
 
 import speech_recognition as sr
+
+# Shared with FAQ thread: only one listener at a time (enrollment vs local Q&A).
+MIC_LOCK = threading.Lock()
 
 from face_robot import config
 from face_robot.audio_utils import audio_probe_context
@@ -42,6 +47,37 @@ def _looks_like_bad_capture(name: str | None) -> bool:
     return "hdmi" in n and "mic" not in n
 
 
+def _pactl_default_source_name() -> str | None:
+    """Pulse/PipeWire default recording source (e.g. robot_pi_webcam_mic after tunnel script)."""
+    try:
+        r = subprocess.run(
+            ["pactl", "get-default-source"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+        if r.returncode != 0:
+            return None
+        name = (r.stdout or "").strip()
+        return name or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _pulse_default_looks_like_pi_tunnel(pulse_source: str) -> bool:
+    pl = pulse_source.lower()
+    return any(
+        x in pl
+        for x in (
+            "robot_pi",
+            "tunnel",
+            "tunnel-source",
+            "module-tunnel",
+        )
+    )
+
+
 def resolve_microphone_index():
     try:
         with audio_probe_context():
@@ -73,6 +109,49 @@ def resolve_microphone_index():
             print(f"✅ Using microphone {index}: {mic_name}")
             return index
 
+    # Pi + laptop: prefer Pulse tunnel mic before MIC_INDEX (often 0/1 = built-in laptop).
+    if config.CAMERA_URL.strip() and config.MIC_TUNNEL_HINTS:
+        for hint in (
+            h.strip().lower()
+            for h in config.MIC_TUNNEL_HINTS.split(",")
+            if h.strip()
+        ):
+            for index, mic_name in enumerate(mic_names):
+                if not mic_name or hint not in mic_name.lower():
+                    continue
+                if not can_capture(index):
+                    continue
+                if _looks_like_bad_capture(mic_name):
+                    continue
+                print(f"✅ Using Pi tunnel microphone {index}: {mic_name}")
+                return index
+
+    # PyAudio often names the device "default" even when Pulse default source is robot_pi_* .
+    pulse_def = _pactl_default_source_name()
+    if (
+        config.CAMERA_URL.strip()
+        and pulse_def
+        and _pulse_default_looks_like_pi_tunnel(pulse_def)
+    ):
+        pdl = pulse_def.lower()
+        for index, mic_name in enumerate(mic_names):
+            if not mic_name or not can_capture(index) or _looks_like_bad_capture(mic_name):
+                continue
+            mn = mic_name.lower()
+            if pdl in mn or mn in pdl or pulse_def.split(".")[-1].lower() in mn:
+                print(f"✅ Using microphone {index}: {mic_name} (Pulse default source)")
+                return index
+        for index, mic_name in enumerate(mic_names):
+            if not mic_name or not can_capture(index) or _looks_like_bad_capture(mic_name):
+                continue
+            if mic_name.strip().lower() == "default":
+                print(
+                    f"✅ Using microphone {index}: {mic_name} "
+                    "(Pulse default capture → Pi tunnel; pactl: "
+                    f"{pulse_def})"
+                )
+                return index
+
     if 0 <= config.MIC_INDEX < len(mic_names):
         name = mic_names[config.MIC_INDEX]
         if can_capture(config.MIC_INDEX) and not _looks_like_bad_capture(name):
@@ -85,6 +164,16 @@ def resolve_microphone_index():
 
     # Prefer any input-capable device that is not HDMI-only.
     if capable:
+        if config.CAMERA_URL.strip():
+            pdn = _pactl_default_source_name() or ""
+            if not _pulse_default_looks_like_pi_tunnel(pdn):
+                print(
+                    "⚠️ CAMERA_URL is set but Pulse default source does not look like a Pi tunnel "
+                    f"({pdn!r}). Run laptop_pi_mic_tunnel.sh, then check "
+                    "`pactl get-default-source` and `pactl list sources short`. "
+                    f"You can set MIC_NAME_HINT to a substring of your tunnel source or MIC_INDEX "
+                    f"for PyAudio 'default' ({config.MIC_TUNNEL_HINTS!r})."
+                )
         for index in sorted(capable):
             name = mic_names[index] if index < len(mic_names) else None
             if _looks_like_bad_capture(name):
@@ -163,11 +252,19 @@ def _ensure_vosk_model():
     return _VOSK_MODEL
 
 
-def _vosk_listen_and_transcribe() -> str | None:
+def _vosk_listen_and_transcribe(
+    *,
+    max_seconds: float | None = None,
+    silence_timeout: float | None = None,
+) -> str | None:
     """
     Offline STT using Vosk. Returns raw text or None.
     Requires: `vosk` package and a model folder at VOSK_MODEL_PATH.
     """
+    max_sec = float(max_seconds if max_seconds is not None else config.VOSK_MAX_SECONDS)
+    silence_sec = float(
+        silence_timeout if silence_timeout is not None else config.VOSK_SILENCE_TIMEOUT
+    )
     try:
         from vosk import KaldiRecognizer
     except Exception as exc:  # ImportError or internal errors
@@ -210,7 +307,7 @@ def _vosk_listen_and_transcribe() -> str | None:
 
     try:
         while True:
-            if time.time() - start > config.VOSK_MAX_SECONDS:
+            if time.time() - start > max_sec:
                 break
 
             data = stream.read(config.MIC_CHUNK_SIZE, exception_on_overflow=False)
@@ -234,7 +331,7 @@ def _vosk_listen_and_transcribe() -> str | None:
                 partial = json.loads(rec.PartialResult() or "{}").get("partial", "").strip()
                 if partial:
                     last_nonempty = time.time()
-                elif time.time() - last_nonempty > config.VOSK_SILENCE_TIMEOUT:
+                elif time.time() - last_nonempty > silence_sec:
                     break
 
         if text_out is None:
@@ -256,6 +353,64 @@ def _vosk_listen_and_transcribe() -> str | None:
     return text_out
 
 
+def listen_faq_google() -> str | None:
+    """Short Google STT pass for FAQ phrase matching (answers still come from nora_faq.json)."""
+    import speech_recognition as sr
+
+    r = sr.Recognizer()
+    r.energy_threshold = config.MIC_MIN_ENERGY
+    r.dynamic_energy_threshold = True
+    r.dynamic_energy_adjustment_damping = 0.12
+    r.dynamic_energy_ratio = _SR_DYNAMIC_ENERGY_RATIO
+    r.pause_threshold = 0.75
+    r.phrase_threshold = 0.2
+    r.non_speaking_duration = 0.45
+    r.operation_timeout = config.FAQ_GOOGLE_TIMEOUT + config.FAQ_GOOGLE_PHRASE_LIMIT
+
+    mic_kw = {"chunk_size": config.MIC_CHUNK_SIZE}
+    if ACTIVE_MIC_INDEX is not None:
+        mic_kw["device_index"] = ACTIVE_MIC_INDEX
+
+    try:
+        with MIC_LOCK:
+            with audio_probe_context():
+                with sr.Microphone(**mic_kw) as source:
+                    amb = min(config.MIC_AMBIENT_DURATION, config.FAQ_GOOGLE_AMBIENT_SEC)
+                    if amb > 0:
+                        r.adjust_for_ambient_noise(source, duration=amb)
+                    r.energy_threshold = max(
+                        r.energy_threshold * config.MIC_AFTER_CALIB_MULT,
+                        config.MIC_MIN_ENERGY,
+                    )
+                    audio = r.listen(
+                        source,
+                        timeout=config.FAQ_GOOGLE_TIMEOUT,
+                        phrase_time_limit=config.FAQ_GOOGLE_PHRASE_LIMIT,
+                    )
+            try:
+                heard_text = r.recognize_google(
+                    audio, language=config.SPEECH_LANGUAGE
+                )
+            except sr.UnknownValueError:
+                return None
+            except sr.RequestError:
+                if (
+                    config.SPEECH_ALT_LANGUAGE
+                    and config.SPEECH_ALT_LANGUAGE != config.SPEECH_LANGUAGE
+                ):
+                    heard_text = r.recognize_google(
+                        audio, language=config.SPEECH_ALT_LANGUAGE
+                    )
+                else:
+                    raise
+        if not heard_text or not str(heard_text).strip():
+            return None
+        print(f"FAQ speech: {heard_text!r}")
+        return str(heard_text).strip()
+    except sr.WaitTimeoutError:
+        return None
+
+
 def get_name():
     r = sr.Recognizer()
     r.energy_threshold = config.MIC_MIN_ENERGY
@@ -269,11 +424,14 @@ def get_name():
 
     for attempt in range(3):
         try:
-            speak("I am the robot. What is your name?")
+            speak("I am the Nora. what is your name?")
+            if config.NAME_LISTEN_AFTER_TTS_SEC > 0:
+                time.sleep(config.NAME_LISTEN_AFTER_TTS_SEC)
 
             heard_text = None
             if config.STT_ENGINE == "vosk":
-                heard_text = _vosk_listen_and_transcribe()
+                with MIC_LOCK:
+                    heard_text = _vosk_listen_and_transcribe()
                 if heard_text:
                     print(f"Speech heard (vosk): {heard_text}")
                 else:
@@ -282,30 +440,45 @@ def get_name():
                 mic_kw = {"chunk_size": config.MIC_CHUNK_SIZE}
                 if ACTIVE_MIC_INDEX is not None:
                     mic_kw["device_index"] = ACTIVE_MIC_INDEX
-                with audio_probe_context():
-                    with sr.Microphone(**mic_kw) as source:
-                        # Keep this small to reduce start-up latency.
-                        if config.MIC_AMBIENT_DURATION > 0:
-                            r.adjust_for_ambient_noise(source, duration=config.MIC_AMBIENT_DURATION)
-                        r.energy_threshold = max(r.energy_threshold * 0.85, config.MIC_MIN_ENERGY)
-                        print(f"Listening with energy threshold: {r.energy_threshold:.1f}")
+                with MIC_LOCK:
+                    with audio_probe_context():
+                        with sr.Microphone(**mic_kw) as source:
+                            # Keep this small to reduce start-up latency.
+                            if config.MIC_AMBIENT_DURATION > 0:
+                                r.adjust_for_ambient_noise(
+                                    source, duration=config.MIC_AMBIENT_DURATION
+                                )
+                            r.energy_threshold = max(
+                                r.energy_threshold * config.MIC_AFTER_CALIB_MULT,
+                                config.MIC_MIN_ENERGY,
+                            )
+                            print(f"Listening with energy threshold: {r.energy_threshold:.1f}")
 
-                        audio = r.listen(
-                            source,
-                            timeout=config.NAME_TIMEOUT,
-                            phrase_time_limit=config.NAME_PHRASE_TIME_LIMIT,
+                            audio = r.listen(
+                                source,
+                                timeout=config.NAME_TIMEOUT,
+                                phrase_time_limit=config.NAME_PHRASE_TIME_LIMIT,
+                            )
+
+                    try:
+                        heard_text = r.recognize_google(
+                            audio, language=config.SPEECH_LANGUAGE
                         )
-
-                try:
-                    heard_text = r.recognize_google(audio, language=config.SPEECH_LANGUAGE)
-                    print(f"Speech heard ({config.SPEECH_LANGUAGE}): {heard_text}")
-                except sr.RequestError:
-                    # Optional one-shot fallback (keeps latency low in normal cases).
-                    if config.SPEECH_ALT_LANGUAGE and config.SPEECH_ALT_LANGUAGE != config.SPEECH_LANGUAGE:
-                        heard_text = r.recognize_google(audio, language=config.SPEECH_ALT_LANGUAGE)
-                        print(f"Speech heard ({config.SPEECH_ALT_LANGUAGE}): {heard_text}")
-                    else:
-                        raise
+                        print(f"Speech heard ({config.SPEECH_LANGUAGE}): {heard_text}")
+                    except sr.RequestError:
+                        # Optional one-shot fallback (keeps latency low in normal cases).
+                        if (
+                            config.SPEECH_ALT_LANGUAGE
+                            and config.SPEECH_ALT_LANGUAGE != config.SPEECH_LANGUAGE
+                        ):
+                            heard_text = r.recognize_google(
+                                audio, language=config.SPEECH_ALT_LANGUAGE
+                            )
+                            print(
+                                f"Speech heard ({config.SPEECH_ALT_LANGUAGE}): {heard_text}"
+                            )
+                        else:
+                            raise
             else:
                 raise RuntimeError("Invalid STT_ENGINE. Use 'google' or 'vosk'.")
 
@@ -320,7 +493,11 @@ def get_name():
             if attempt < 2:
                 speak("Please say only your first name clearly")
         except sr.WaitTimeoutError:
-            print(f"Speech error: listening timed out on attempt {attempt + 1}")
+            print(
+                f"Speech error: listening timed out (no speech detected) on attempt {attempt + 1}. "
+                "Try MIC_AFTER_CALIB_MULT=0.35, lower MIC_MIN_ENERGY, longer NAME_TIMEOUT, "
+                "or verify Pi mic tunnel / levels."
+            )
             if attempt < 2:
                 speak("I did not hear anything")
         except Exception as e:

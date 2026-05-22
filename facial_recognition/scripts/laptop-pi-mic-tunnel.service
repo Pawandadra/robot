@@ -1,0 +1,22 @@
+# Install: copy this file to ~/.config/systemd/user/laptop-pi-mic-tunnel.service
+# Edit ExecStart path if your repo is not at ~/Documents/robot/facial_recognition
+#
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now laptop-pi-mic-tunnel.service
+#
+# If the Pi boots after the laptop:  systemctl --user restart laptop-pi-mic-tunnel.service
+# Requires a graphical (or lingering) login so PipeWire runs.
+
+[Unit]
+Description=Robot Pi webcam mic (Pulse tunnel + default source)
+After=pipewire.service pipewire-pulse.service
+Wants=pipewire-pulse.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/sleep 3
+ExecStart=%h/Documents/robot/facial_recognition/scripts/laptop_pi_mic_tunnel.sh
+
+[Install]
+WantedBy=default.target

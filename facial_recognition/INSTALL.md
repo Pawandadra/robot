@@ -188,6 +188,8 @@ python main.py remove-user "FirstName"
 
 ## 8. Laptop + Raspberry Pi (processing on laptop, hardware on robot)
 
+**Plain step-by-step (simple words):** see **`PI_AND_LAPTOP_SIMPLE.md`** in this folder.
+
 Keep **MySQL**, **Python face app**, **Piper TTS**, and **`main.py`** on the **laptop**. On the **Pi** you only need: TCP → Giga serial, optional MJPEG camera stream, and (if you use it) network audio.
 
 ### Motor control (Giga USB on the Pi)

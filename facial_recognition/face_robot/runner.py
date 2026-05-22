@@ -1,4 +1,5 @@
 import sys
+import threading
 import time
 
 import face_recognition
@@ -6,10 +7,40 @@ import numpy as np
 
 from face_robot import config
 from face_robot import database
+from face_robot import faq_local
 from face_robot import face_storage
 from face_robot import speech_input
 from face_robot import vision
 from face_robot import voice
+
+
+def _faq_worker(faq_state: dict, stop: threading.Event) -> None:
+    last_poll = 0.0
+    last_answer = 0.0
+    while not stop.is_set():
+        time.sleep(0.2)
+        if not config.ENABLE_LOCAL_FAQ or not faq_local.is_ready():
+            continue
+        if faq_state.get("busy") or faq_state.get("faces", 0) == 0:
+            continue
+        now = time.monotonic()
+        if now - last_answer < config.FAQ_COOLDOWN_AFTER_ANSWER_SEC:
+            continue
+        if now - last_poll < config.FAQ_POLL_INTERVAL_SEC:
+            continue
+        last_poll = now
+        try:
+            text = speech_input.listen_faq_google()
+        except Exception as e:
+            print(f"⚠️ FAQ listen: {e}")
+            continue
+        if not text:
+            continue
+        ans = faq_local.match(text.strip())
+        if ans:
+            last_answer = time.monotonic()
+            print(f"FAQ: {text!r} -> {ans!r}")
+            voice.speak(ans)
 
 
 def _pause_with_hold(hold, faces_count: int, interaction_busy: bool, seconds: float) -> None:
@@ -26,6 +57,18 @@ def _pause_with_hold(hold, faces_count: int, interaction_busy: bool, seconds: fl
 def run():
     voice.init_voice()
     database.init_db()
+    faq_local.load()
+    if config.ENABLE_LOCAL_FAQ:
+        if faq_local.is_ready():
+            print(
+                "✅ Local FAQ: answers from data/nora_faq.json; listening via Google STT"
+            )
+        else:
+            print(
+                "⚠️ Local FAQ unavailable: add entries to data/nora_faq.json or set "
+                "ENABLE_LOCAL_FAQ=0."
+            )
+
     voice.speak("System ready")
 
     speech_input.init_microphone()
@@ -85,6 +128,18 @@ def run():
 
     interaction_busy = False
 
+    faq_state: dict = {"faces": 0, "busy": False}
+    faq_stop = threading.Event()
+    faq_thread: threading.Thread | None = None
+    if config.ENABLE_LOCAL_FAQ:
+        faq_thread = threading.Thread(
+            target=_faq_worker,
+            args=(faq_state, faq_stop),
+            name="faq-local",
+            daemon=True,
+        )
+        faq_thread.start()
+
     try:
         while True:
             try:
@@ -101,6 +156,8 @@ def run():
                     continue
 
                 rgb, valid_faces = vision.detect_faces(frame)
+                faq_state["faces"] = len(valid_faces) if valid_faces else 0
+                faq_state["busy"] = interaction_busy
                 if not valid_faces:
                     match_counts.clear()
                     unknown_count = 0
@@ -346,6 +403,9 @@ def run():
                 return
 
     finally:
+        faq_stop.set()
+        if faq_thread is not None:
+            faq_thread.join(timeout=2.0)
         if hold:
             hold.shutdown()
         video.release()
