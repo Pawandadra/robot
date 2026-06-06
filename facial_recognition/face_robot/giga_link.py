@@ -15,6 +15,8 @@ except ImportError as e:
         "pyserial required for Giga USB. pip install pyserial  (or apt install python3-serial)"
     ) from e
 
+RECONNECT_COOLDOWN_SEC = 2.0
+
 
 def _score_port(description: str, manufacturer: str | None) -> int:
     d = f"{description or ''} {manufacturer or ''}".lower()
@@ -129,6 +131,7 @@ class GigaSerial:
     Send HOLD/RUN only when the desired state changes.
     Uses CRLF so the Giga line parser always sees a complete line (same as typing Enter).
     No blocking reads — works even if the sketch prints TICK spam.
+    TCP/socket links auto-reconnect after broken pipe (Pi bridge restart, network blip).
     """
 
     def __init__(
@@ -141,6 +144,8 @@ class GigaSerial:
     ) -> None:
         self._debug = debug
         self._device = device.strip()
+        self._baud = baud
+        self._boot_delay_sec = boot_delay_sec
         self._ser = _open_serial(self._device, baud)
         # Opening a TCP bridge does not reset the Giga; USB boot delay is only for local open serial.
         dl = self._device.lower()
@@ -150,8 +155,12 @@ class GigaSerial:
             time.sleep(boot_delay_sec)
         self._drain_rx()
         self._last_hold: bool | None = None
+        self._last_reconnect_mono = 0.0
+        self._warned_write_fail = False
 
     def _drain_rx(self) -> None:
+        if not self._ser.is_open:
+            return
         old = self._ser.timeout
         self._ser.timeout = 0.05
         try:
@@ -162,28 +171,81 @@ class GigaSerial:
         finally:
             self._ser.timeout = old
 
+    def _close_quiet(self) -> None:
+        try:
+            if self._ser.is_open:
+                self._ser.close()
+        except Exception:
+            pass
+
+    def _reconnect(self) -> bool:
+        now = time.monotonic()
+        if now - self._last_reconnect_mono < RECONNECT_COOLDOWN_SEC:
+            return False
+        self._last_reconnect_mono = now
+        self._close_quiet()
+        try:
+            self._ser = _open_serial(self._device, self._baud)
+            dl = self._device.lower()
+            if self._boot_delay_sec > 0 and not (
+                dl.startswith("socket://") or dl.startswith("rfc2217://")
+            ):
+                time.sleep(min(self._boot_delay_sec, 0.5))
+            self._drain_rx()
+            self._last_hold = None
+            self._warned_write_fail = False
+            print(f"✅ Giga reconnected: {self._device}")
+            return True
+        except serial.SerialException as e:
+            if not self._warned_write_fail:
+                print(f"⚠️ Giga reconnect failed: {e}")
+            return False
+
+    def _write_line(self, payload: bytes) -> bool:
+        for attempt in range(2):
+            try:
+                if not self._ser.is_open:
+                    if not self._reconnect():
+                        return False
+                self._ser.write(payload)
+                self._ser.flush()
+                self._warned_write_fail = False
+                return True
+            except (serial.SerialException, OSError, BrokenPipeError) as e:
+                if attempt == 0 and self._reconnect():
+                    continue
+                if not self._warned_write_fail:
+                    print(
+                        f"⚠️ Giga write failed ({e}). "
+                        f"Check Pi bridge: pi_giga_tcp_bridge.py on port 7000."
+                    )
+                    self._warned_write_fail = True
+                self._last_hold = None
+                return False
+        return False
+
     def set_hold(self, want_hold: bool, *, resume_with_90_turn: bool = False) -> None:
         if want_hold:
             if self._last_hold is True:
                 return
-            self._ser.write(b"HOLD\r\n")
-            self._ser.flush()
+            if not self._write_line(b"HOLD\r\n"):
+                return
             self._last_hold = True
             if self._debug:
                 print(f"[Giga] HOLD -> {getattr(self._ser, 'port', self._device)}")
             return
         # release (RUN or RUN90 — RUN90 pivots ~90° on firmware before cruise)
         if resume_with_90_turn:
-            self._ser.write(b"RUN90\r\n")
-            self._ser.flush()
+            if not self._write_line(b"RUN90\r\n"):
+                return
             self._last_hold = False
             if self._debug:
                 print(f"[Giga] RUN90 -> {getattr(self._ser, 'port', self._device)}")
             return
         if self._last_hold is False:
             return
-        self._ser.write(b"RUN\r\n")
-        self._ser.flush()
+        if not self._write_line(b"RUN\r\n"):
+            return
         self._last_hold = False
         if self._debug:
             print(f"[Giga] RUN -> {getattr(self._ser, 'port', self._device)}")
@@ -192,14 +254,13 @@ class GigaSerial:
         """Send HOLD again (already in hold state). Recovers from missed USB lines."""
         if self._last_hold is not True:
             return
-        self._ser.write(b"HOLD\r\n")
-        self._ser.flush()
+        if not self._write_line(b"HOLD\r\n"):
+            return
         if self._debug:
             print(f"[Giga] HOLD (pulse) -> {getattr(self._ser, 'port', self._device)}")
 
     def close(self) -> None:
-        if self._ser.is_open:
-            self._ser.close()
+        self._close_quiet()
 
 
 def open_giga_optional(

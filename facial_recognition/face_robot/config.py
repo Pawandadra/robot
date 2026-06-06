@@ -34,6 +34,8 @@ GREET_PAUSE_AFTER_ENROLL_SEC = float(
 GREET_PAUSE_AFTER_GROUP_SEC = float(os.getenv("GREET_PAUSE_AFTER_GROUP_SEC", "1.5"))
 
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "2"))
+# Optional explicit V4L2 device path (e.g. /dev/video0). If set, it is tried before CAMERA_INDEX.
+CAMERA_DEVICE = os.getenv("CAMERA_DEVICE", "").strip()
 # If set (e.g. http://pi:8080/stream.mjpg), OpenCV reads the robot camera over the network (Pi + mjpg-streamer).
 CAMERA_URL = os.getenv("CAMERA_URL", "").strip()
 ALLOW_CAMERA_FALLBACK = os.getenv("ALLOW_CAMERA_FALLBACK", "1") == "1"

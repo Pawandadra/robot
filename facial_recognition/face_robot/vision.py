@@ -3,6 +3,7 @@ import time
 import cv2
 import face_recognition
 import numpy as np
+from pathlib import Path
 
 from face_robot import config
 
@@ -31,20 +32,109 @@ def iou(a, b):
     return inter / denom
 
 
+def _camera_url_candidates(url: str) -> list[str]:
+    """Try common Pi stream paths (ustreamer vs mjpg-streamer)."""
+    u = url.strip().rstrip("/")
+    if not u:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def add(candidate: str) -> None:
+        c = candidate.strip()
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+
+    add(u)
+    if "?" not in u:
+        add(f"{u}/?action=stream")
+        add(f"{u}/?action=stream&dummy=1")
+    if u.endswith("/stream"):
+        base = u[: -len("/stream")]
+        add(f"{base}/?action=stream")
+        add(f"{base}/?action=stream&dummy=1")
+    elif "/?action=stream" in u:
+        base = u.split("/?action=stream", 1)[0]
+        add(f"{base}/stream")
+
+    # Common MJPEG endpoints seen across apps/cameras.
+    if "://" in u and "?" not in u:
+        add(f"{u}/stream.mjpg")
+        add(f"{u}/stream.mjpeg")
+        add(f"{u}/mjpeg")
+        add(f"{u}/mjpg")
+        add(f"{u}/video")
+
+    return out
+
+
+def _v4l2_device_candidates() -> list[str]:
+    devices: list[str] = []
+    for p in sorted(Path("/dev").glob("video*")):
+        if p.is_char_device():
+            devices.append(str(p))
+    return devices
+
+
+def _try_open_capture(source, *, backends: list[int] | None = None):
+    backends = backends or [cv2.CAP_ANY]
+    for backend in backends:
+        cam = cv2.VideoCapture(source, backend)
+        if cam.isOpened():
+            return cam
+        cam.release()
+    return None
+
+
 def open_camera():
     url = getattr(config, "CAMERA_URL", "") or ""
     if url:
-        print(f"Opening CAMERA_URL stream…")
-        cam = cv2.VideoCapture(url)
-        if cam.isOpened():
-            for _ in range(8):
+        for candidate in _camera_url_candidates(url):
+            print(f"Opening CAMERA_URL stream… {candidate}")
+            cam = _try_open_capture(
+                candidate,
+                backends=[cv2.CAP_FFMPEG, cv2.CAP_GSTREAMER, cv2.CAP_ANY],
+            )
+            if cam is None:
+                continue
+            for _ in range(12):
                 ok, frame = cam.read()
                 if ok and frame is not None and frame.size > 0:
-                    print("✅ Camera opened from URL stream")
+                    if candidate != url.strip():
+                        print(f"✅ Camera opened from URL stream ({candidate})")
+                    else:
+                        print("✅ Camera opened from URL stream")
                     return cam
-                time.sleep(0.08)
-        cam.release()
-        print("❌ CAMERA_URL failed to deliver frames; falling back to local cameras.")
+                time.sleep(0.1)
+            cam.release()
+        print(
+            "❌ CAMERA_URL failed to deliver frames "
+            f"(tried {len(_camera_url_candidates(url))} URL(s)); falling back to local cameras."
+        )
+
+    device_candidates: list[str] = []
+    if getattr(config, "CAMERA_DEVICE", ""):
+        device_candidates.append(config.CAMERA_DEVICE)
+    device_candidates.extend(_v4l2_device_candidates())
+
+    if device_candidates:
+        tried_dev: set[str] = set()
+        for dev in device_candidates:
+            if dev in tried_dev:
+                continue
+            tried_dev.add(dev)
+            print(f"Trying V4L2 device {dev}...")
+            cam = _try_open_capture(dev, backends=[cv2.CAP_V4L2, cv2.CAP_ANY])
+            if cam is None:
+                continue
+            ok, frame = cam.read()
+            if ok and frame is not None and frame.size > 0:
+                print(f"✅ Camera opened at {dev}")
+                return cam
+            cam.release()
+    else:
+        print("⚠️ No /dev/video* devices found.")
 
     candidates = [config.CAMERA_INDEX]
     if config.ALLOW_CAMERA_FALLBACK:
@@ -55,12 +145,13 @@ def open_camera():
             continue
         tried.add(idx)
         print(f"Trying camera index {idx}...")
-        cam = cv2.VideoCapture(idx, cv2.CAP_V4L2)
-        if cam.isOpened():
-            ok, _ = cam.read()
-            if ok:
-                print(f"✅ Camera opened at index {idx}")
-                return cam
+        cam = _try_open_capture(idx, backends=[cv2.CAP_V4L2, cv2.CAP_ANY])
+        if cam is None:
+            continue
+        ok, frame = cam.read()
+        if ok and frame is not None and frame.size > 0:
+            print(f"✅ Camera opened at index {idx}")
+            return cam
         cam.release()
     if config.ALLOW_CAMERA_FALLBACK:
         print("❌ Could not open any configured or fallback camera.")

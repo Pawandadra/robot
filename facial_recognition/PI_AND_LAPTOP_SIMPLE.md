@@ -65,7 +65,7 @@ You need a **small web video stream** from the Pi. Many people use **mjpg-stream
 2. Start it with your camera device (often `/dev/video0`):
   ```bash
    ustreamer --device=/dev/video0 --resolution=640x480 --desired-fps=15 --port=8080 --host=0.0.0.0
-   ```
+  ```
 3. On the **laptop web browser**, open:
   `http://192.168.1.50:8080/?action=stream`  
    (use **your** Pi IP.)
@@ -125,16 +125,18 @@ The face app on the laptop uses a **microphone on the laptop**. Your mic is on t
 
 **What each file does**
 
-| File (in the repo) | Where it runs | Purpose |
-|--------------------|---------------|---------|
-| *(you create on Pi)* `/etc/pipewire/.../99-native-protocol-tcp.conf` | **Raspberry Pi** | Opens TCP **4713** so the laptop may pull audio from the Pi |
-| `scripts/robot-pi-mic.env.example` | **Laptop** (copy → `~/.config/robot-pi-mic.env`) | Pi IP, port, and **exact** mic `source=` name from the Pi |
-| `scripts/laptop_pi_mic_tunnel.sh` | **Laptop** | Loads Pulse tunnel + `pactl set-default-source` so “default” mic is the Pi |
-| `scripts/laptop-pi-mic-tunnel.service` | **Laptop** (`~/.config/systemd/user/`) | Runs that script once after you log in (PipeWire session) |
-| `scripts/laptop_pi_speaker_tunnel.sh` | **Laptop** | Optional: tunnel **playback** to the Pi so Piper/paplay play on the robot |
-| `scripts/laptop-pi-speaker-tunnel.service` | **Laptop** | Optional: run the speaker tunnel at login |
 
-Set **`PROJECT`** once to your clone path (adjust if yours differs):
+| File (in the repo)                                                   | Where it runs                                    | Purpose                                                                    |
+| -------------------------------------------------------------------- | ------------------------------------------------ | -------------------------------------------------------------------------- |
+| *(you create on Pi)* `/etc/pipewire/.../99-native-protocol-tcp.conf` | **Raspberry Pi**                                 | Opens TCP **4713** so the laptop may pull audio from the Pi                |
+| `scripts/robot-pi-mic.env.example`                                   | **Laptop** (copy → `~/.config/robot-pi-mic.env`) | Pi IP, port, and **exact** mic `source=` name from the Pi                  |
+| `scripts/laptop_pi_mic_tunnel.sh`                                    | **Laptop**                                       | Loads Pulse tunnel + `pactl set-default-source` so “default” mic is the Pi |
+| `scripts/laptop-pi-mic-tunnel.service`                               | **Laptop** (`~/.config/systemd/user/`)           | Runs that script once after you log in (PipeWire session)                  |
+| `scripts/laptop_pi_speaker_tunnel.sh`                                | **Laptop**                                       | Optional: tunnel **playback** to the Pi so Piper/paplay play on the robot  |
+| `scripts/laptop-pi-speaker-tunnel.service`                           | **Laptop**                                       | Optional: run the speaker tunnel at login                                  |
+
+
+Set `**PROJECT`** once to your clone path (adjust if yours differs):
 
 ```bash
 export PROJECT="$HOME/Documents/robot/facial_recognition"
@@ -145,100 +147,61 @@ export PROJECT="$HOME/Documents/robot/facial_recognition"
 ### A — Raspberry Pi (one-time, persistent)
 
 1. On the Pi, see whether audio is **PipeWire** (usual on recent Pi OS):
-
-   ```bash
+  ```bash
    pactl list sources short | head -3
-   ```
-
-   If the line ends with **`PipeWire`**, use **step 2** below.  
+  ```
+   If the line ends with `**PipeWire**`, use **step 2** below.  
    If you truly run **only** classic PulseAudio (no PipeWire), use **Step 4** in “Part 1” above (`default.pa` + `load-module module-native-protocol-tcp ...`) instead of step 2 here.
-
 2. **PipeWire — open port 4713** (create system drop-in):
-
-   ```bash
+  ```bash
    sudo mkdir -p /etc/pipewire/pipewire-pulse.conf.d
    sudo nano /etc/pipewire/pipewire-pulse.conf.d/99-native-protocol-tcp.conf
-   ```
-
+  ```
    Paste (edit subnets to match **your** network: home Wi‑Fi, phone hotspot `172.20.10.0/24`, etc.):
-
-   ```ini
-   pulse.cmd = [
-       { cmd = "load-module" args = "module-native-protocol-tcp listen=0.0.0.0 port=4713 auth-ip-acl=127.0.0.1;172.20.10.0/24;192.168.0.0/16 auth-anonymous=1" }
-   ]
-   ```
-
 3. **Reboot the Pi**, then check:
-
-   ```bash
+  ```bash
    ss -tlnp | grep 4713
-   ```
-
-   You should see **`pipewire-pulse`** (or similar) **listening on 0.0.0.0:4713**.
-
+  ```
+   You should see `**pipewire-pulse**` (or similar) **listening on 0.0.0.0:4713**.
 4. **Copy the mic source name** (second column) for your webcam:
-
-   ```bash
+  ```bash
    pactl list sources short
-   ```
-
+  ```
    Example: `alsa_input.usb-FINGERS_FINGERS_1080_Hi-Res_Webcam_....mono-fallback` — you will paste this into the laptop env file.
 
 ---
 
 ### B — Laptop (one-time files + login automation)
 
-1. **Create the laptop config** from the example (uses **`$PROJECT`**):
-
-   ```bash
+1. **Create the laptop config** from the example (uses `**$PROJECT`**):
+  ```bash
    mkdir -p ~/.config
    cp "$PROJECT/scripts/robot-pi-mic.env.example" ~/.config/robot-pi-mic.env
    nano ~/.config/robot-pi-mic.env
-   ```
-
-   Set **`ROBOT_PI_HOST`** to your Pi’s IP (e.g. `192.168.1.50` or `172.20.10.2`).  
-   Set **`ROBOT_PI_MIC_SOURCE`** to the **exact** string from Pi `pactl list sources short` (webcam line).  
-   Leave **`ROBOT_PI_PULSE_PORT=4713`** unless you changed the Pi.
-
+  ```
+   Set `**ROBOT_PI_HOST**` to your Pi’s IP (e.g. `192.168.1.50` or `172.20.10.2`).  
+   Set `**ROBOT_PI_MIC_SOURCE**` to the **exact** string from Pi `pactl list sources short` (webcam line).  
+   Leave `**ROBOT_PI_PULSE_PORT=4713`** unless you changed the Pi.
 2. **Test manually** (script must be executable: `chmod +x "$PROJECT/scripts/laptop_pi_mic_tunnel.sh"`):
-
-   ```bash
+  ```bash
    chmod +x "$PROJECT/scripts/laptop_pi_mic_tunnel.sh"
    "$PROJECT/scripts/laptop_pi_mic_tunnel.sh"
-   ```
-
-   You should see a line like **`Default source: robot_pi_webcam_mic`** (or a tunnel name).  
+  ```
+   You should see a line like `**Default source: robot_pi_webcam_mic**` (or a tunnel name).  
    Check: `pactl info | grep -i "Default Source"`.
-
-3. **PyAudio / `.env`**: run the one-liner from Step 4 (Part 1) and note the index for **`default`** (often **17**). In **`facial_recognition/.env`** set **`MIC_INDEX=`** that number and **`MIC_NAME_HINT=`** empty (or delete the hint line).
-
+3. **PyAudio / `.env`**: run the one-liner from Step 4 (Part 1) and note the index for `**default**` (often **17**). In `**facial_recognition/.env`** set `**MIC_INDEX=**` that number and `**MIC_NAME_HINT=**` empty (or delete the hint line).
 4. **Start the tunnel automatically on login**:
-
-   ```bash
+  ```bash
    mkdir -p ~/.config/systemd/user
    cp "$PROJECT/scripts/laptop-pi-mic-tunnel.service" ~/.config/systemd/user/laptop-pi-mic-tunnel.service
-   ```
-
-   Open the copied unit and set **`ExecStart=`** to your real script path if you are **not** using `~/Documents/robot/facial_recognition`:
-
-   ```text
-   ExecStart=%h/Documents/robot/facial_recognition/scripts/laptop_pi_mic_tunnel.sh
-   ```
-
+  ```
+   Open the copied unit and set `**ExecStart=**` to your real script path if you are **not** using `~/Documents/robot/facial_recognition`:
    Then:
-
-   ```bash
-   systemctl --user daemon-reload
-   systemctl --user enable --now laptop-pi-mic-tunnel.service
-   ```
-
    **Note:** This only runs when **your user** has a session (graphical login or **user lingering**). Headless SSH-only with no audio session may need extra setup.
-
 5. If the **Pi boots after** the laptop, run:
-
-   ```bash
+  ```bash
    systemctl --user restart laptop-pi-mic-tunnel.service
-   ```
+  ```
 
 **Firewall:** the laptop must reach the Pi on **TCP 4713** (and **8080** / **7000** for camera and Giga bridge).
 
@@ -246,57 +209,46 @@ export PROJECT="$HOME/Documents/robot/facial_recognition"
 
 ### C — TTS on the Pi (optional: audio **out** on the robot)
 
-The face app runs Piper on the **laptop**, but **`paplay`** uses your **default Pulse/PipeWire sink**. If that sink is a **tunnel to the Pi**, speech comes out of the Pi’s **headphone jack / HDMI / USB speaker** (whatever is the Pi’s default output).
+The face app runs Piper on the **laptop**, but `**paplay`** uses your **default Pulse/PipeWire sink**. If that sink is a **tunnel to the Pi**, speech comes out of the Pi’s **headphone jack / HDMI / USB speaker** (whatever is the Pi’s default output).
 
 **No Python changes** — same `voice.py` and Piper; only Pulse routing changes.
 
 1. **On the Pi**, get the default **playback** device name:
-
-   ```bash
+  ```bash
    pactl get-default-sink
    # or full list:
    pactl list sinks short
-   ```
-
+  ```
    Copy the **sink name** (second column), e.g. `alsa_output.platform-bcm2835_audio-analog-stereo` or an HDMI sink.
-
-2. **On the laptop**, add to **`~/.config/robot-pi-mic.env`** (same file as the mic tunnel):
-
-   ```bash
+2. **On the laptop**, add to `**~/.config/robot-pi-mic.env`** (same file as the mic tunnel):
+  ```bash
    ROBOT_PI_SINK=alsa_output.platform-bcm2835_audio-analog-stereo
    ROBOT_PI_SPEAKER_LOCAL_NAME=robot_pi_speaker
-   ```
-
+  ```
    (Use **your** sink string from step 1.)
-
 3. **Test:**
-
-   ```bash
+  ```bash
    chmod +x "$PROJECT/scripts/laptop_pi_speaker_tunnel.sh"
    "$PROJECT/scripts/laptop_pi_speaker_tunnel.sh"
    pactl info | grep -i "Default Sink"
-   ```
-
+  ```
    You should hear a short test if you run `paplay` on a WAV file on the laptop.
-
 4. **Login service (optional):**
-
-   ```bash
+  ```bash
    cp "$PROJECT/scripts/laptop-pi-speaker-tunnel.service" ~/.config/systemd/user/
    # Edit ExecStart path if needed (same as mic service)
    systemctl --user daemon-reload
    systemctl --user enable --now laptop-pi-speaker-tunnel.service
-   ```
-
+  ```
 5. **Pi boots after laptop:** `systemctl --user restart laptop-pi-speaker-tunnel.service`
 
-**Note:** Bluetooth speakers on the Pi are possible but add latency; wired analog or HDMI is simplest. If **`ROBOT_PI_SINK`** is not set, `laptop_pi_speaker_tunnel.sh` exits successfully and does nothing (mic-only setups).
+**Note:** Bluetooth speakers on the Pi are possible but add latency; wired analog or HDMI is simplest. If `**ROBOT_PI_SINK`** is not set, `laptop_pi_speaker_tunnel.sh` exits successfully and does nothing (mic-only setups).
 
 **Louder voice on the Pi**
 
-1. **Laptop** — in **`~/.config/robot-pi-mic.env`** raise **`ROBOT_PI_SPEAKER_VOLUME_PERCENT`** (default **150** after this change; try **180**–**200**). Re-run `laptop_pi_speaker_tunnel.sh` (or restart the systemd user service).
-2. **Laptop** — optional extra boost for **`paplay`**: in **`facial_recognition/.env`** set **`PAPLAY_VOLUME=98304`** (~150% of Pulse’s stream scale; **`65536`** = 100%).
-3. **On the Pi** — boost physical output: `pactl set-sink-volume @DEFAULT_SINK@ 150%` and/or use **`alsamixer`** for the sound card. Un-mute: `pactl set-sink-mute @DEFAULT_SINK@ 0`.
+1. **Laptop** — in `**~/.config/robot-pi-mic.env`** raise `**ROBOT_PI_SPEAKER_VOLUME_PERCENT**` (default **150** after this change; try **180**–**200**). Re-run `laptop_pi_speaker_tunnel.sh` (or restart the systemd user service).
+2. **Laptop** — optional extra boost for `**paplay`**: in `**facial_recognition/.env**` set `**PAPLAY_VOLUME=98304**` (~150% of Pulse’s stream scale; `**65536**` = 100%).
+3. **On the Pi** — boost physical output: `pactl set-sink-volume @DEFAULT_SINK@ 150%` and/or use `**alsamixer`** for the sound card. Un-mute: `pactl set-sink-mute @DEFAULT_SINK@ 0`.
 
 ---
 
@@ -412,7 +364,7 @@ This is a bit **hardware-specific**; if unsure, **Way 1 (powered hub)** is simpl
 
 3. On the Pi, enable the serial port (disable serial console on that UART if needed—Pi OS docs: “UART on Raspberry Pi”).
 4. On the Giga, your sketch must read commands on `**Serial1`** (or another UART), not only `Serial` USB—or **duplicate** the same line parser on `Serial1`.
-5. On the Pi, the device is often `**/dev/serial0`** or `**/dev/ttyAMA0**` instead of `/dev/ttyACM0`. Run:
+5. On the Pi, the device is often `**/dev/serial0`** or `**/dev/ttyAMA0`** instead of `/dev/ttyACM0`. Run:
   ```bash
    python3 pi_giga_tcp_bridge.py --device /dev/serial0 --port 7000
   ```
@@ -424,7 +376,7 @@ This avoids USB power to the Giga from the Pi completely, but you **change firmw
 
 1. **Firmware (`movement.ino`)**
   Near the top of the sketch, set `**HOST_USE_SERIAL1` to `1`** (or add build flag `-DHOST_USE_SERIAL1=1`).  
-   Re-upload to the Giga. Host replies (`OK HOLD`, etc.) go on `**Serial1**`; USB `**Serial**` is still for boot / debug text only.
+   Re-upload to the Giga. Host replies (`OK HOLD`, etc.) go on `**Serial1`**; USB `**Serial**` is still for boot / debug text only.
 2. **Pi: enable the UART on the GPIO header**
   - `sudo raspi-config` → **Interface Options** → **Serial Port**.  
   - **Login shell over serial:** **No**.  
